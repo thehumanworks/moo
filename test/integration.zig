@@ -17,14 +17,18 @@ extern "c" fn kill(pid: std.c.pid_t, sig: c_int) c_int;
 
 const default_timeout_ms: u64 = 10_000;
 
-/// ioctl request codes are comptime_ints on Linux and packed values on
-/// other platforms; normalize to c_ulong.
-fn reqToUlong(req: anytype) c_ulong {
-    return switch (@typeInfo(@TypeOf(req))) {
-        .int, .comptime_int => @intCast(req),
-        else => @intCast(@as(u32, @bitCast(req))),
-    };
-}
+/// Terminal ioctl request codes; Zig's std lacks the darwin set variants.
+const Tio = switch (@import("builtin").os.tag) {
+    .macos, .ios, .tvos, .watchos, .visionos => struct {
+        const IOCSWINSZ: c_ulong = 0x80087467;
+        const IOCSCTTY: c_ulong = 0x20007461;
+    },
+    .linux => struct {
+        const IOCSWINSZ: c_ulong = std.os.linux.T.IOCSWINSZ;
+        const IOCSCTTY: c_ulong = std.os.linux.T.IOCSCTTY;
+    },
+    else => @compileError("unsupported OS"),
+};
 
 /// Per-test environment: an isolated socket directory under /tmp (kept
 /// short because of sockaddr_un path limits).
@@ -194,8 +198,16 @@ const PtyClient = struct {
         const path_len = std.mem.indexOfScalar(u8, &path_buf, 0) orelse return error.OpenPtyFailed;
         const slave_path = path_buf[0..path_len :0];
 
+        // Open the slave before setting the size: macOS rejects
+        // TIOCSWINSZ on the master until the slave has been opened.
+        const slave = posix.openZ(slave_path, .{
+            .ACCMODE = .RDWR,
+            .NOCTTY = true,
+        }, 0) catch return error.OpenPtyFailed;
+        errdefer posix.close(slave);
+
         const ws: posix.winsize = .{ .row = rows, .col = cols, .xpixel = 0, .ypixel = 0 };
-        if (ioctl(master, reqToUlong(posix.T.IOCSWINSZ), @intFromPtr(&ws)) != 0) {
+        if (ioctl(slave, Tio.IOCSWINSZ, @intFromPtr(&ws)) != 0) {
             return error.IoctlFailed;
         }
 
@@ -215,10 +227,10 @@ const PtyClient = struct {
 
         const pid = try posix.fork();
         if (pid == 0) {
-            // Child: make the PTY slave the controlling terminal.
+            // Child: make the inherited PTY slave the controlling
+            // terminal (login_tty pattern).
             _ = posix.setsid() catch posix.exit(127);
-            const slave = posix.openZ(slave_path, .{ .ACCMODE = .RDWR }, 0) catch posix.exit(127);
-            if (ioctl(slave, reqToUlong(posix.T.IOCSCTTY), @as(c_ulong, 0)) != 0) {
+            if (ioctl(slave, Tio.IOCSCTTY, @as(c_ulong, 0)) != 0) {
                 posix.exit(127);
             }
             posix.dup2(slave, 0) catch posix.exit(127);
@@ -231,6 +243,7 @@ const PtyClient = struct {
             posix.exit(127);
         }
 
+        posix.close(slave);
         return .{ .alloc = alloc, .master = master, .pid = pid };
     }
 
@@ -251,7 +264,7 @@ const PtyClient = struct {
 
     fn setSize(self: *PtyClient, rows: u16, cols: u16) !void {
         const ws: posix.winsize = .{ .row = rows, .col = cols, .xpixel = 0, .ypixel = 0 };
-        if (ioctl(self.master, reqToUlong(posix.T.IOCSWINSZ), @intFromPtr(&ws)) != 0) {
+        if (ioctl(self.master, Tio.IOCSWINSZ, @intFromPtr(&ws)) != 0) {
             return error.IoctlFailed;
         }
     }
