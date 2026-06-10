@@ -9,7 +9,7 @@ const daemonpkg = @import("daemon.zig");
 const paths = @import("paths.zig");
 const protocol = @import("protocol.zig");
 
-pub const version = "0.0.1";
+pub const version = "0.0.2";
 
 const usage =
     \\usage: ghostscreen [options] [command ...]
@@ -81,7 +81,11 @@ pub fn main() !void {
             return;
         },
         .show_version => {
-            std.debug.print("ghostscreen {s}\n", .{version});
+            var buf: [64]u8 = undefined;
+            var stdout_writer = std.fs.File.stdout().writer(&buf);
+            const out = &stdout_writer.interface;
+            try out.print("ghostscreen {s}\n", .{version});
+            try out.flush();
             return;
         },
         .list => try cmdList(alloc),
