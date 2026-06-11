@@ -166,9 +166,6 @@ This is a young project, not a drop-in GNU screen replacement:
 Feel free to [open an issue](https://github.com/coder/boo/issues/new)
 if you have questions, run into bugs, or have a feature request.
 
-[Join the Coder Discord](https://discord.gg/coder) to chat with the
-community.
-
 ## License
 
 [MIT](LICENSE). Ghostty itself is MIT licensed.
