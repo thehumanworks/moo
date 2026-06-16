@@ -1581,14 +1581,14 @@ test "ui: scrolling output keeps the viewport in sync with the session" {
     try std.testing.expectEqual(@as(i64, 200), prev);
 }
 
-test "ui: the empty state shows the ghost and the keybind hint" {
+test "ui: the empty state shows moo, the cow, and the keybind hint" {
     const alloc = std.testing.allocator;
     var h = try Harness.init(alloc);
     defer h.deinit();
 
     var ui = try PtyClient.spawn(&h, &.{"ui"}, 24, 100);
     defer ui.deinit();
-    try ui.waitFor("(o o)");
+    try ui.waitFor("^__^");
     try ui.waitFor("no sessions");
     try ui.waitFor("Press Ctrl+A for Keybinds");
 }
@@ -1752,7 +1752,7 @@ test "ui: killing the only session brings back the splash" {
     try ui.send("\x01k");
     try ui.waitFor("kill solo? y/n");
     try ui.send("y");
-    try ui.waitFor("(o o)");
+    try ui.waitFor("^__^");
     try ui.waitFor("no sessions");
     try std.testing.expect(std.mem.indexOf(u8, ui.output.items, "no session focused") == null);
 }

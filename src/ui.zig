@@ -2992,24 +2992,29 @@ const Ui = struct {
         try out.appendSlice(self.alloc, sgr_reset);
     }
 
-    /// The moo wordmark and its ghost, shown when nothing is focused.
-    const ghost_art = [_][]const u8{
-        " _                     .-.",
-        "| |__   ___   ___     (o o)",
-        "| '_ \\ / _ \\ / _ \\    | O \\",
-        "| |_) | (_) | (_) |    \\   \\",
-        "|_.__/ \\___/ \\___/      `~~~'",
+    /// "moo" title and ASCII cow, shown when nothing is focused.
+    const splash_art = [_][]const u8{
+        " __  __   ___   ___ ",
+        "|  \\/  | / _ \\ / _ \\",
+        "| |\\/| || (_) | (_) |",
+        "|_|  |_||\\___/ \\___/ ",
+        "",
+        "        \\   ^__^",
+        "         \\  (oo)\\_______",
+        "            (__)\\       )\\/\\",
+        "                ||----w |",
+        "                ||     ||",
     };
 
     /// Empty state when nothing is focusable: no sessions at all, or
-    /// only ones this UI must not attach on its own. The wordmark art
-    /// centered as a block, then a hint underneath.
+    /// only ones this UI must not attach on its own. The moo title and
+    /// cow art centered as a block, then a hint underneath.
     fn composeNoSessions(self: *Ui, y: u16, out: *std.ArrayList(u8)) !void {
         const alloc = self.alloc;
         const l = self.layout;
         const vw = l.viewportCols();
 
-        const art_h: u16 = ghost_art.len;
+        const art_h: u16 = splash_art.len;
         const total: u16 = art_h + 3; // art, blank, two hint lines
         const top = (l.viewportRows() -| total) / 2;
         if (y < top) return;
@@ -3017,11 +3022,11 @@ const Ui = struct {
 
         if (line < art_h) {
             var art_w: usize = 0;
-            for (ghost_art) |a| art_w = @max(art_w, a.len);
+            for (splash_art) |a| art_w = @max(art_w, a.len);
             if (art_w >= vw) return;
             const pad = (vw - art_w) / 2;
             for (0..pad) |_| try out.append(alloc, ' ');
-            try out.appendSlice(alloc, ghost_art[line]);
+            try out.appendSlice(alloc, splash_art[line]);
             return;
         }
 
@@ -3745,14 +3750,14 @@ test "ui: an empty viewport shows the splash, not a placard" {
     var no_title: [0]u8 = .{};
     try ui.sessions.append(alloc, .{ .name = &host, .attached = true, .idle_ms = 0, .title = &no_title });
 
-    // Nothing selected (say, only this UI's host remains): the ghost
+    // Nothing selected (say, only this UI's host remains): the moo/cow
     // splash renders instead of a "no session focused" placard.
     var out: std.ArrayList(u8) = .empty;
     defer out.deinit(alloc);
     for (0..ui.layout.viewportRows()) |y| {
         try ui.composeViewportCell(@intCast(y), &out);
     }
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "(o o)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "^__^") != null);
     try std.testing.expect(std.mem.indexOf(u8, out.items, "no session focused") == null);
 
     // A selected session held by another client keeps its hint.
@@ -3762,6 +3767,31 @@ test "ui: an empty viewport shows the splash, not a placard" {
         try ui.composeViewportCell(@intCast(y), &out);
     }
     try std.testing.expect(std.mem.indexOf(u8, out.items, "attached elsewhere") != null);
+}
+
+test "ui: splash ASCII title spells moo with two o's" {
+    const alloc = std.testing.allocator;
+    var ui: Ui = .{ .alloc = alloc, .dir = "", .tty = -1 };
+    defer ui.sessions.deinit(alloc);
+    ui.layout = .init(24, 100);
+
+    var host = "host".*;
+    var no_title: [0]u8 = .{};
+    try ui.sessions.append(alloc, .{ .name = &host, .attached = true, .idle_ms = 0, .title = &no_title });
+
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(alloc);
+    for (0..ui.layout.viewportRows()) |y| {
+        try ui.composeViewportCell(@intCast(y), &out);
+    }
+
+    // figlet-style "moo": two rounded blocks for the two o's (not "mo").
+    try std.testing.expect(std.mem.indexOf(u8, out.items, " __  __   ___   ___ ") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "|  \\/  | / _ \\ / _ \\") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "|_|  |_||\\___/ \\___/ ") != null);
+    // Old single-o title had only one trailing ___ / _ \ group.
+    try std.testing.expect(std.mem.indexOf(u8, out.items, " __  __  ___ ") == null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "|  \\/  |/ _ \\") == null);
 }
 
 test "ui: goto matches prefer name prefixes over substrings" {
