@@ -18,12 +18,12 @@ pub fn validateName(name: []const u8) NameError!void {
 }
 
 /// Resolve the runtime directory that holds session sockets:
-/// $BOO_DIR, else $XDG_RUNTIME_DIR/boo, else /tmp/boo-<uid>.
+/// $MOO_DIR, else $XDG_RUNTIME_DIR/moo, else /tmp/moo-<uid>.
 /// The directory is created with mode 0700.
 pub fn socketDir(alloc: std.mem.Allocator) ![]u8 {
     return socketDirFrom(
         alloc,
-        std.posix.getenv("BOO_DIR"),
+        std.posix.getenv("MOO_DIR"),
         std.posix.getenv("XDG_RUNTIME_DIR"),
     );
 }
@@ -34,8 +34,8 @@ pub fn socketDir(alloc: std.mem.Allocator) ![]u8 {
 /// /run/user/<uid> path), creating it would mean writing to system
 /// directories: mkdir /run on the sealed macOS system volume fails with
 /// error.ReadOnlyFileSystem. Honor the variable only when the directory
-/// exists and the boo subdirectory is creatable inside it; otherwise
-/// fall back to /tmp/boo-<uid>. $BOO_DIR is an explicit override, so
+/// exists and the moo subdirectory is creatable inside it; otherwise
+/// fall back to /tmp/moo-<uid>. $MOO_DIR is an explicit override, so
 /// errors there stay fatal rather than being silently redirected.
 fn socketDirFrom(
     alloc: std.mem.Allocator,
@@ -54,14 +54,14 @@ fn socketDirFrom(
         if (d.len == 0) break :usable;
         var parent = std.fs.cwd().openDir(d, .{}) catch break :usable;
         parent.close();
-        const dir = try std.fs.path.join(alloc, &.{ d, "boo" });
+        const dir = try std.fs.path.join(alloc, &.{ d, "moo" });
         ensureDir(dir) catch {
             alloc.free(dir);
             break :usable;
         };
         return dir;
     }
-    const dir = try std.fmt.allocPrint(alloc, "/tmp/boo-{d}", .{std.c.getuid()});
+    const dir = try std.fmt.allocPrint(alloc, "/tmp/moo-{d}", .{std.c.getuid()});
     errdefer alloc.free(dir);
     try ensureDir(dir);
     return dir;
@@ -80,6 +80,37 @@ pub fn socketPath(alloc: std.mem.Allocator, dir: []const u8, name: []const u8) !
     const file = try std.fmt.allocPrint(alloc, "{s}.sock", .{name});
     defer alloc.free(file);
     return std.fs.path.join(alloc, &.{ dir, file });
+}
+
+/// Per-session agent sidecar: "<dir>/<name>.agent" (a JSON file recording the
+/// harness, session id, and transcript store). Lives beside the socket but is
+/// invisible to listSessions, which only matches "*.sock".
+pub fn sidecarPath(alloc: std.mem.Allocator, dir: []const u8, name: []const u8) ![]u8 {
+    const file = try std.fmt.allocPrint(alloc, "{s}.agent", .{name});
+    defer alloc.free(file);
+    return std.fs.path.join(alloc, &.{ dir, file });
+}
+
+/// Per-session transcript store: "<dir>/<name>.store" (an isolated directory for
+/// agents that need one, e.g. codex's CODEX_HOME or pi's --session-dir).
+pub fn storeDir(alloc: std.mem.Allocator, dir: []const u8, name: []const u8) ![]u8 {
+    const sub = try std.fmt.allocPrint(alloc, "{s}.store", .{name});
+    defer alloc.free(sub);
+    return std.fs.path.join(alloc, &.{ dir, sub });
+}
+
+/// Best-effort removal of a session's agent sidecar and transcript store. The
+/// socket itself is owned by the daemon and removed on quit, so it is left
+/// alone here.
+pub fn removeAgentFiles(alloc: std.mem.Allocator, dir: []const u8, name: []const u8) void {
+    if (sidecarPath(alloc, dir, name)) |sc| {
+        defer alloc.free(sc);
+        std.fs.cwd().deleteFile(sc) catch {};
+    } else |_| {}
+    if (storeDir(alloc, dir, name)) |store| {
+        defer alloc.free(store);
+        std.fs.cwd().deleteTree(store) catch {};
+    } else |_| {}
 }
 
 /// Map an arbitrary string onto the session-name character set: bytes
@@ -180,14 +211,44 @@ test "socketPath" {
     try std.testing.expectEqualStrings("/run/gs/work.sock", p);
 }
 
-test "socketDirFrom prefers BOO_DIR and creates it" {
+test "sidecarPath and storeDir" {
+    const alloc = std.testing.allocator;
+    const sc = try sidecarPath(alloc, "/run/gs", "work");
+    defer alloc.free(sc);
+    try std.testing.expectEqualStrings("/run/gs/work.agent", sc);
+    const store = try storeDir(alloc, "/run/gs", "work");
+    defer alloc.free(store);
+    try std.testing.expectEqualStrings("/run/gs/work.store", store);
+}
+
+test "removeAgentFiles deletes sidecar and store, ignores absence" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try tmp.dir.realpathAlloc(alloc, ".");
+    defer alloc.free(dir);
+
+    // Absent files: must not error.
+    removeAgentFiles(alloc, dir, "ghost");
+
+    try tmp.dir.writeFile(.{ .sub_path = "work.agent", .data = "{}" });
+    try tmp.dir.makePath("work.store/sessions");
+    try tmp.dir.writeFile(.{ .sub_path = "work.store/sessions/x", .data = "y" });
+
+    removeAgentFiles(alloc, dir, "work");
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access("work.agent", .{}));
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access("work.store", .{}));
+    // The .sock that listSessions keys on is untouched by this helper.
+}
+
+test "socketDirFrom prefers MOO_DIR and creates it" {
     const alloc = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     const base = try tmp.dir.realpathAlloc(alloc, ".");
     defer alloc.free(base);
 
-    const want = try std.fs.path.join(alloc, &.{ base, "override", "boo" });
+    const want = try std.fs.path.join(alloc, &.{ base, "override", "moo" });
     defer alloc.free(want);
 
     const dir = try socketDirFrom(alloc, want, null);
@@ -207,7 +268,7 @@ test "socketDirFrom uses an existing runtime dir" {
     const dir = try socketDirFrom(alloc, null, runtime);
     defer alloc.free(dir);
 
-    const want = try std.fs.path.join(alloc, &.{ runtime, "boo" });
+    const want = try std.fs.path.join(alloc, &.{ runtime, "moo" });
     defer alloc.free(want);
     try std.testing.expectEqualStrings(want, dir);
     var d = try std.fs.cwd().openDir(dir, .{});
@@ -221,7 +282,7 @@ test "socketDirFrom falls back when the runtime dir is unusable" {
     const base = try tmp.dir.realpathAlloc(alloc, ".");
     defer alloc.free(base);
 
-    const fallback = try std.fmt.allocPrint(alloc, "/tmp/boo-{d}", .{std.c.getuid()});
+    const fallback = try std.fmt.allocPrint(alloc, "/tmp/moo-{d}", .{std.c.getuid()});
     defer alloc.free(fallback);
 
     // Missing directory, like /run/user/<uid> on macOS. The fallback

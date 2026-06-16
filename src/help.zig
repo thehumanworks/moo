@@ -7,12 +7,12 @@ pub const Entry = struct {
     name: []const u8,
     /// Optional short alias (e.g. `at` for `attach`).
     alias: ?[]const u8 = null,
-    /// Full help text printed by `boo help <name>`.
+    /// Full help text printed by `moo help <name>`.
     body: []const u8,
 };
 
 pub const overview =
-    \\boo: sessions that haunt your terminal
+    \\moo: sessions that haunt your terminal
     \\
     \\A terminal multiplexer in the spirit of GNU screen, built on
     \\libghostty. Sessions keep running when you disconnect; reattach
@@ -20,12 +20,13 @@ pub const overview =
     \\human would see them.
     \\
     \\usage:
-    \\  boo <command> [arguments]
+    \\  moo <command> [arguments]
     \\
     \\commands:
     \\
     \\  Session Management
-    \\    new [name] [-d] [-- cmd...]  start a session (attach unless -d)
+    \\    new [name] [-d] [--agent <a>] [-- cmd...]
+    \\                                 start a session (attach unless -d)
     \\    attach, at, a <name>         attach a session (steals politely)
     \\    ui, i                        manage sessions in a full-screen UI
     \\    ls [--json]                  list sessions
@@ -33,6 +34,7 @@ pub const overview =
     \\  Interaction
     \\    send <name> [flags]          type into a session
     \\    peek <name>                  print the session's screen
+    \\    read <name>                  read an agent session's transcript
     \\    wait <name>                  block until output matches or settles
     \\
     \\  Administration
@@ -43,18 +45,19 @@ pub const overview =
     \\    version                      print the version
     \\    help [page]                  this overview, or detailed help
     \\
-    \\Run 'boo help <command>' for flags and examples, 'boo help keys'
-    \\for the key bindings inside a session, 'boo help automation' for
-    \\driving boo from scripts, or 'boo help --all' for every page.
+    \\Run 'moo help <command>' for flags and examples, 'moo help keys'
+    \\for the key bindings inside a session, 'moo help automation' for
+    \\driving moo from scripts, 'moo help agents' for wrapping coding
+    \\agents, or 'moo help --all' for every page.
     \\
     \\session selection:
     \\  Commands taking <name> accept a unique prefix of the session
-    \\  name (e.g. 'boo attach bu' for "build").
+    \\  name (e.g. 'moo attach bu' for "build").
     \\
     \\environment:
-    \\  BOO_DIR  socket directory
-    \\           (default: $XDG_RUNTIME_DIR/boo, else /tmp/boo-<uid>)
-    \\  BOO_LOG  append daemon logs to this file (debugging)
+    \\  MOO_DIR  socket directory
+    \\           (default: $XDG_RUNTIME_DIR/moo, else /tmp/moo-<uid>)
+    \\  MOO_LOG  append daemon logs to this file (debugging)
     \\
 ;
 
@@ -62,7 +65,7 @@ pub const commands = [_]Entry{
     .{
         .name = "new",
         .body =
-        \\usage: boo new [name] [-d|--detached] [-- cmd...]
+        \\usage: moo new [name] [-d|--detached] [--agent <agent>] [-- cmd...]
         \\
         \\Start a session running cmd (default: $SHELL) and attach to
         \\it. The session keeps running after you detach (C-a d) or
@@ -74,13 +77,21 @@ pub const commands = [_]Entry{
         \\after '--' is the command to run in the session.
         \\
         \\flags:
-        \\  -d, --detached  start without attaching and print the
-        \\                  session name on stdout
+        \\  -d, --detached   start without attaching and print the
+        \\                   session name on stdout
+        \\  --agent <agent>  wrap a coding agent so its transcript can be
+        \\                   read with 'moo read'. One of: claude, codex,
+        \\                   pi, raw, bash, zsh. The launch command is
+        \\                   augmented (e.g. a pinned session id) and a
+        \\                   sidecar records where the transcript lives.
+        \\                   A command after '--' overrides the default.
         \\
         \\examples:
-        \\  boo new                      interactive shell, attach now
-        \\  boo new work                 named session
-        \\  boo new build -d -- make -j  background a build
+        \\  moo new                      interactive shell, attach now
+        \\  moo new work                 named session
+        \\  moo new build -d -- make -j  background a build
+        \\  moo new bot --agent claude   wrap Claude Code, attach now
+        \\  moo new cx -d --agent codex  background codex; read it later
         \\
         ,
     },
@@ -88,9 +99,9 @@ pub const commands = [_]Entry{
         .name = "attach",
         .alias = "at",
         .body =
-        \\usage: boo attach <name>
-        \\       boo at <name>
-        \\       boo a <name>
+        \\usage: moo attach <name>
+        \\       moo at <name>
+        \\       moo a <name>
         \\
         \\Attach this terminal to a session. The screen, scrollback,
         \\cursor, and title are restored from terminal state. If the
@@ -99,12 +110,12 @@ pub const commands = [_]Entry{
         \\
         \\A unique prefix of the name is accepted.
         \\
-        \\Inside the session, press C-a d to detach. See 'boo help
+        \\Inside the session, press C-a d to detach. See 'moo help
         \\keys' for all bindings.
         \\
         \\examples:
-        \\  boo attach build     reattach "build"
-        \\  boo at bu            the same, by prefix
+        \\  moo attach build     reattach "build"
+        \\  moo at bu            the same, by prefix
         \\
         ,
     },
@@ -112,8 +123,8 @@ pub const commands = [_]Entry{
         .name = "ui",
         .alias = "i",
         .body =
-        \\usage: boo ui
-        \\       boo i
+        \\usage: moo ui
+        \\       moo i
         \\
         \\Manage sessions in a full-screen interface: a sidebar lists
         \\every session (window title underneath) and the focused
@@ -167,7 +178,7 @@ pub const commands = [_]Entry{
         .name = "ls",
         .alias = "list",
         .body =
-        \\usage: boo ls [--json]
+        \\usage: moo ls [--json]
         \\
         \\List sessions: name, attach state, idle time (time since the
         \\last output or client input), and the session's title. Stale
@@ -182,7 +193,7 @@ pub const commands = [_]Entry{
     .{
         .name = "send",
         .body =
-        \\usage: boo send <name> [--text <text>] [--key <list>] [flags]
+        \\usage: moo send <name> [--text <text>] [--key <list>] [flags]
         \\
         \\Type into a session, exactly as if the text had been typed
         \\at the keyboard. --text is sent literally: no escape
@@ -200,16 +211,16 @@ pub const commands = [_]Entry{
         \\  --stdin        force reading from stdin
         \\
         \\examples:
-        \\  boo send build --text 'make test' --enter   run a command
-        \\  boo send build --key C-c                    interrupt it
-        \\  printf 'y\n' | boo send build               pipe bytes in
+        \\  moo send build --text 'make test' --enter   run a command
+        \\  moo send build --key C-c                    interrupt it
+        \\  printf 'y\n' | moo send build               pipe bytes in
         \\
         ,
     },
     .{
         .name = "peek",
         .body =
-        \\usage: boo peek <name> [--scrollback] [--json]
+        \\usage: moo peek <name> [--scrollback] [--json]
         \\
         \\Print the session's rendered screen: what a human attached
         \\right now would see, reconstructed from terminal state (not
@@ -221,15 +232,56 @@ pub const commands = [_]Entry{
         \\                "cursor":{"row","col"},"screen"}
         \\
         \\examples:
-        \\  boo peek build | tail -20
-        \\  boo peek build --scrollback | grep -n error
+        \\  moo peek build | tail -20
+        \\  moo peek build --scrollback | grep -n error
+        \\
+        ,
+    },
+    .{
+        .name = "read",
+        .body =
+        \\usage: moo read <name> [--json] [--thinking]
+        \\       moo read --agent <agent> <file> [--json] [--thinking]
+        \\
+        \\Read a coding agent's transcript, de-noised: the human prompts,
+        \\the agent's replies, and its tool calls, with injected and
+        \\internal records dropped. Unlike 'peek' (which prints the
+        \\rendered screen) this reads the agent's own JSONL log, so it is
+        \\stable regardless of what the TUI is showing.
+        \\
+        \\With a session name, the session must have been started with
+        \\'--agent'; a one-line status header reports what the agent is
+        \\doing (idle, running, waiting_for_input, ...). With '--agent
+        \\<agent>' and a file path, any saved transcript is de-noised
+        \\directly, no session required.
+        \\
+        \\flags:
+        \\  --json       emit structured JSON instead of text. Session
+        \\               form: {"session","agent","state","messages",
+        \\               "transcript":[...]}. File form: just the array.
+        \\  --thinking   include the agent's reasoning blocks (omitted by
+        \\               default; never available for codex)
+        \\  --agent <a>  read a transcript file directly (claude, codex,
+        \\               pi); pass the path positionally or via --file
+        \\  --file <p>   the transcript file (alternative to positional)
+        \\
+        \\Agent state is read from the transcript, so a permission or
+        \\approval prompt that never reaches disk reads as 'running'.
+        \\Only Claude's native question/plan tools surface as
+        \\'waiting_for_input'. See 'moo help agents'.
+        \\
+        \\examples:
+        \\  moo read bot                 status + conversation, as text
+        \\  moo read bot --json | jq .   structured, for scripts
+        \\  moo read cx --thinking       include reasoning
+        \\  moo read --agent codex rollout.jsonl   dump a saved log
         \\
         ,
     },
     .{
         .name = "wait",
         .body =
-        \\usage: boo wait <name> (--text <text> | --idle) [--timeout <dur>]
+        \\usage: moo wait <name> (--text <text> | --idle) [--timeout <dur>]
         \\
         \\Block until something happens in the session, then exit 0.
         \\Replaces sleep-and-poll loops in scripts.
@@ -245,56 +297,56 @@ pub const commands = [_]Entry{
         \\(or 4hr), 1d. Flags also accept --flag=value.
         \\
         \\examples:
-        \\  boo wait build --text 'PASS' --timeout 2m
-        \\  boo wait build --idle && boo peek build
+        \\  moo wait build --text 'PASS' --timeout 2m
+        \\  moo wait build --idle && moo peek build
         \\
         ,
     },
     .{
         .name = "kill",
         .body =
-        \\usage: boo kill <name | --all>
+        \\usage: moo kill <name | --all>
         \\
         \\End a session: its process receives SIGHUP and the daemon
         \\exits. --all ends every session and sweeps stale sockets.
         \\
         \\examples:
-        \\  boo kill build
-        \\  boo kill --all
+        \\  moo kill build
+        \\  moo kill --all
         \\
         ,
     },
     .{
         .name = "rename",
         .body =
-        \\usage: boo rename <name> <new-name>
+        \\usage: moo rename <name> <new-name>
         \\
         \\Rename a session. The running program is unaffected and an
         \\attached client stays attached. The old name accepts a
         \\unique prefix, like attach.
         \\
         \\example:
-        \\  boo rename work api-server
+        \\  moo rename work api-server
         \\
         ,
     },
     .{
         .name = "version",
         .body =
-        \\usage: boo version
+        \\usage: moo version
         \\
-        \\Print the boo version. Also available as -V or --version.
+        \\Print the moo version. Also available as -V or --version.
         \\
         ,
     },
     .{
         .name = "help",
         .body =
-        \\usage: boo help [page] [--all]
+        \\usage: moo help [page] [--all]
         \\
         \\Show the overview or a detailed page. There is a page for
         \\every command, plus 'keys' (the C-a bindings inside a
-        \\session) and 'automation' (driving boo from scripts and AI
+        \\session) and 'automation' (driving moo from scripts and AI
         \\agents). --all prints every page in one pass, which is handy
         \\for piping into a pager or for tools that want to learn the
         \\whole CLI in one call.
@@ -315,26 +367,26 @@ pub const topics = [_]Entry{
         \\
         \\Control variants match GNU screen: C-a C-d detaches and
         \\C-a C-l redraws. Detaching leaves the session running;
-        \\'boo attach' brings it back.
+        \\'moo attach' brings it back.
         \\
-        \\'boo ui' adds bindings for managing sessions; see
-        \\'boo help ui'.
+        \\'moo ui' adds bindings for managing sessions; see
+        \\'moo help ui'.
         \\
         ,
     },
     .{
         .name = "automation",
         .body =
-        \\Driving boo from scripts and AI agents
+        \\Driving moo from scripts and AI agents
         \\
         \\Everything except 'attach' works without a terminal. The
         \\canonical loop:
         \\
-        \\  boo new build -d -- bash               # 1. headless session
-        \\  boo send build --text 'make' --enter   # 2. type into it
-        \\  boo wait build --idle                  # 3. let output settle
-        \\  boo peek build --scrollback            # 4. read the screen
-        \\  boo kill build                         # 5. clean up
+        \\  moo new build -d -- bash               # 1. headless session
+        \\  moo send build --text 'make' --enter   # 2. type into it
+        \\  moo wait build --idle                  # 3. let output settle
+        \\  moo peek build --scrollback            # 4. read the screen
+        \\  moo kill build                         # 5. clean up
         \\
         \\reading state:
         \\  peek prints the rendered screen, not a raw byte stream:
@@ -342,9 +394,9 @@ pub const topics = [_]Entry{
         \\  history; --json adds size, cursor, and title.
         \\
         \\waiting (instead of sleep):
-        \\  boo wait <name> --text <text>   screen contains <text>
-        \\  boo wait <name> --idle          output quiet for 2 seconds
-        \\  boo wait <name> ... --timeout <dur>   exit 4 on timeout
+        \\  moo wait <name> --text <text>   screen contains <text>
+        \\  moo wait <name> --idle          output quiet for 2 seconds
+        \\  moo wait <name> ... --timeout <dur>   exit 4 on timeout
         \\
         \\sending input:
         \\  send is literal: no escapes, no implicit newline, no
@@ -352,8 +404,8 @@ pub const topics = [_]Entry{
         \\  control keys; stdin mode is binary safe.
         \\
         \\machine-readable output:
-        \\  boo ls --json    [{"name","attached","idle_ms","title"}]
-        \\  boo peek --json  {"session","title","rows","cols",
+        \\  moo ls --json    [{"name","attached","idle_ms","title"}]
+        \\  moo peek --json  {"session","title","rows","cols",
         \\                    "cursor":{"row","col"},"screen"}
         \\
         \\exit codes:
@@ -362,9 +414,64 @@ pub const topics = [_]Entry{
         \\
         \\tips:
         \\  - Sessions are cheap; use one session per task.
-        \\  - 'boo new -d' prints the session name on stdout.
+        \\  - 'moo new -d' prints the session name on stdout.
         \\  - Pick unique session names so [name] prefixes stay
         \\    unambiguous.
+        \\
+        ,
+    },
+    .{
+        .name = "agents",
+        .body =
+        \\Wrapping coding agents
+        \\
+        \\moo can run any program, but coding agents (Claude Code, codex,
+        \\pi) each keep a structured JSONL transcript on disk. '--agent'
+        \\launches one so moo knows where that transcript is, and 'moo
+        \\read' turns it into a de-noised conversation plus a one-line
+        \\status of what the agent is doing.
+        \\
+        \\  moo new bot --agent claude -d   # 1. wrap Claude Code
+        \\  moo send bot --text 'fix the build' --enter
+        \\  moo wait bot --idle             # 2. coarse wait: output settles
+        \\  moo read bot                    # 3. read the conversation
+        \\  moo kill bot                    # 4. clean up (drops sidecar)
+        \\
+        \\'wait --idle' watches the screen (output quiet for 2s), a coarse
+        \\proxy. For an authoritative turn-complete signal, poll the
+        \\transcript state until 'moo read <name> --json' reports
+        \\state "idle".
+        \\
+        \\what --agent does:
+        \\  - augments the launch command so the transcript is locatable
+        \\    (claude/pi get a pinned --session-id; codex gets a private
+        \\    CODEX_HOME so its rollout is unambiguous)
+        \\  - writes a sidecar beside the socket ("<name>.agent") and an
+        \\    isolated store ("<name>.store") where needed; both are
+        \\    removed by 'moo kill'
+        \\  - a command after '--' overrides the agent's default; the
+        \\    interactive TUI is always launched (never a one-shot mode)
+        \\
+        \\read states (from the transcript):
+        \\  idle               turn finished, sitting at the prompt
+        \\  running            generating a reply or running tools
+        \\  waiting_for_input  Claude asked via a native question/plan
+        \\                     tool (Claude only)
+        \\  truncated          last turn hit the token cap
+        \\  unknown            no transcript yet, or not classifiable
+        \\
+        \\capability matrix:
+        \\                      claude   codex   pi
+        \\  read transcript       yes     yes    yes
+        \\  thinking blocks       yes     no     yes
+        \\  waiting_for_input     yes     no     no
+        \\
+        \\limitations:
+        \\  - Permission/approval prompts that never reach disk read as
+        \\    'running', not a waiting state (true for all three).
+        \\  - codex encrypts its reasoning, so --thinking is a no-op there.
+        \\  - 'moo read <name>' needs a live session; to read a finished
+        \\    or saved log use 'moo read --agent <agent> <file>'.
         \\
         ,
     },

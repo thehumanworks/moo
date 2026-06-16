@@ -2,3 +2,10 @@ zig-out/
 .zig-cache/
 result
 result-*
+
+# Local tool config (machine-specific)
+mise.local.toml
+mise.local.lock
+
+# Zig 0.16 fetch dir (we build with pinned 0.15.2)
+zig-pkg/

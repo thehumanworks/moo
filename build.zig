@@ -4,7 +4,7 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    const run_step = b.step("run", "Run boo");
+    const run_step = b.step("run", "Run moo");
     const test_step = b.step("test", "Run unit tests");
     const integration_step = b.step("test-integration", "Run PTY integration tests");
     const test_all_step = b.step("test-all", "Run all tests");
@@ -21,12 +21,17 @@ pub fn build(b: *std.Build) void {
     if (b.lazyDependency("ghostty", .{
         .target = target,
         .optimize = optimize,
+        // moo only consumes the ghostty-vt module, never ghostty's macOS
+        // XCFramework. Building that artifact runs LibCInstallation.findNative,
+        // which requires an Xcode/SDK setup that isn't always present (and
+        // defaults on for a native macOS build). Skip it.
+        .@"emit-xcframework" = false,
     })) |dep| {
         exe_mod.addImport("ghostty-vt", dep.module("ghostty-vt"));
     }
 
     const exe = b.addExecutable(.{
-        .name = "boo",
+        .name = "moo",
         .root_module = exe_mod,
     });
     b.installArtifact(exe);
@@ -58,6 +63,11 @@ pub fn build(b: *std.Build) void {
     if (b.lazyDependency("ghostty", .{
         .target = target,
         .optimize = optimize,
+        // moo only consumes the ghostty-vt module, never ghostty's macOS
+        // XCFramework. Building that artifact runs LibCInstallation.findNative,
+        // which requires an Xcode/SDK setup that isn't always present (and
+        // defaults on for a native macOS build). Skip it.
+        .@"emit-xcframework" = false,
     })) |dep| {
         integration_mod.addImport("ghostty-vt", dep.module("ghostty-vt"));
     }
@@ -79,11 +89,16 @@ pub fn build(b: *std.Build) void {
     if (b.lazyDependency("ghostty", .{
         .target = target,
         .optimize = optimize,
+        // moo only consumes the ghostty-vt module, never ghostty's macOS
+        // XCFramework. Building that artifact runs LibCInstallation.findNative,
+        // which requires an Xcode/SDK setup that isn't always present (and
+        // defaults on for a native macOS build). Skip it.
+        .@"emit-xcframework" = false,
     })) |dep| {
         bench_mod.addImport("ghostty-vt", dep.module("ghostty-vt"));
     }
     const bench_exe = b.addExecutable(.{
-        .name = "boo-bench",
+        .name = "moo-bench",
         .root_module = bench_mod,
     });
     const bench_run = b.addRunArtifact(bench_exe);

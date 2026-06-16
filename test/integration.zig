@@ -1,4 +1,4 @@
-//! End-to-end tests that drive the real boo binary through a real
+//! End-to-end tests that drive the real moo binary through a real
 //! PTY: a test "terminal" (PTY master) hosts the attach client as
 //! its controlling terminal, exactly like a user's terminal would.
 //! Detached control flows go through the public subcommand CLI.
@@ -82,7 +82,7 @@ const Harness = struct {
 
         var env = try std.process.getEnvMap(self.alloc);
         defer env.deinit();
-        try env.put("BOO_DIR", self.dir);
+        try env.put("MOO_DIR", self.dir);
 
         return std.process.Child.run(.{
             .allocator = self.alloc,
@@ -98,7 +98,7 @@ const Harness = struct {
         defer self.alloc.free(result.stdout);
         defer self.alloc.free(result.stderr);
         if (result.term != .Exited or result.term.Exited != 0) {
-            std.debug.print("boo {s} failed: {s}\n", .{ argv[0], result.stderr });
+            std.debug.print("moo {s} failed: {s}\n", .{ argv[0], result.stderr });
             return error.CommandFailed;
         }
     }
@@ -110,7 +110,7 @@ const Harness = struct {
         defer self.alloc.free(result.stderr);
         if (result.term != .Exited or result.term.Exited != want) {
             std.debug.print(
-                "boo {s}: wanted exit {d}, got {any}: {s}\n",
+                "moo {s}: wanted exit {d}, got {any}: {s}\n",
                 .{ argv[0], want, result.term, result.stderr },
             );
             return error.WrongExit;
@@ -191,7 +191,7 @@ const Deadline = struct {
     }
 };
 
-/// A boo client process running on a real PTY owned by the test.
+/// A moo client process running on a real PTY owned by the test.
 const PtyClient = struct {
     alloc: std.mem.Allocator,
     master: posix.fd_t,
@@ -208,7 +208,7 @@ const PtyClient = struct {
         return spawnProgram(harness, exe_path, argv, rows, cols);
     }
 
-    /// Like spawn, but runs an arbitrary program instead of the boo
+    /// Like spawn, but runs an arbitrary program instead of the moo
     /// binary, e.g. a shell wrapping an attach the way a login shell
     /// does for a user.
     fn spawnProgram(
@@ -258,7 +258,7 @@ const PtyClient = struct {
         for (argv, 1..) |arg, i| argv_z[i] = try arena.dupeZ(u8, arg);
 
         var env = try std.process.getEnvMap(arena);
-        try env.put("BOO_DIR", harness.dir);
+        try env.put("MOO_DIR", harness.dir);
         const envp = try std.process.createEnvironFromMap(arena, &env, .{});
 
         const pid = try posix.fork();
@@ -673,7 +673,7 @@ test "auto-repeated C-a stays armed until the command key" {
 /// key keeps auto-repeating until the restored screen is visible, and
 /// one final repeat lands after the client has already restored. The
 /// attach runs under a wrapping shell on the same tty (a login shell
-/// stand-in) whose `read` exposes any input that boo leaks: leaked
+/// stand-in) whose `read` exposes any input that moo leaks: leaked
 /// repeats corrupt the typed probe line, and a leaked C-d (EOF) ends
 /// the read prematurely, which is the SSH-session-killer variant.
 fn expectNoDetachKeyLeak(
@@ -938,7 +938,7 @@ test "help: overview, command pages, topics, and version" {
     const ver = try h.run(&.{"version"});
     defer alloc.free(ver.stdout);
     defer alloc.free(ver.stderr);
-    try std.testing.expect(std.mem.startsWith(u8, ver.stdout, "boo "));
+    try std.testing.expect(std.mem.startsWith(u8, ver.stdout, "moo "));
 }
 
 test "ls emits machine-readable JSON" {
@@ -1026,7 +1026,7 @@ test "wait --text and --idle observe session output" {
     try h.runExit(&.{ "wait", "w1", "--text", "NEVER-APPEARS", "--timeout", "300ms" }, 4);
 }
 
-test "zero-arg boo prints the help overview" {
+test "zero-arg moo prints the help overview" {
     const alloc = std.testing.allocator;
     var h = try Harness.init(alloc);
     defer h.deinit();
@@ -1236,6 +1236,104 @@ test "agent loop: new, send, wait, peek, kill" {
     try h.runExit(&.{ "peek", "agent" }, 3);
 }
 
+test "agent: --agent writes a sidecar, read classifies, kill cleans up" {
+    const alloc = std.testing.allocator;
+    var h = try Harness.init(alloc);
+    defer h.deinit();
+
+    // Wrap a fake long-running agent (sh acting as `cat`). --agent claude
+    // augments the launch (a pinned --session-id, harmless to sh) and records a
+    // sidecar, so no real `claude` binary is needed for the plumbing test.
+    const new = try h.run(&.{ "new", "agx", "--agent", "claude", "-d", "--", "sh", "-c", "cat" });
+    defer alloc.free(new.stdout);
+    defer alloc.free(new.stderr);
+    try std.testing.expect(new.term.Exited == 0);
+    try h.waitSessionUp("agx");
+
+    // The sidecar exists beside the socket and records the harness id.
+    const sc_path = try std.fs.path.join(alloc, &.{ h.dir, "agx.agent" });
+    defer alloc.free(sc_path);
+    const sc_data = try std.fs.cwd().readFileAlloc(alloc, sc_path, 1 << 16);
+    defer alloc.free(sc_data);
+    {
+        var parsed = try std.json.parseFromSlice(std.json.Value, alloc, sc_data, .{});
+        defer parsed.deinit();
+        try std.testing.expectEqualStrings("claude", parsed.value.object.get("agent").?.string);
+    }
+
+    // read resolves the live session and classifies from the (absent) transcript.
+    const read = try h.run(&.{ "read", "agx", "--json" });
+    defer alloc.free(read.stdout);
+    defer alloc.free(read.stderr);
+    try std.testing.expect(read.term.Exited == 0);
+    {
+        var parsed = try std.json.parseFromSlice(std.json.Value, alloc, read.stdout, .{});
+        defer parsed.deinit();
+        const obj = parsed.value.object;
+        try std.testing.expectEqualStrings("agx", obj.get("session").?.string);
+        try std.testing.expectEqualStrings("claude", obj.get("agent").?.string);
+        try std.testing.expect(obj.get("state") != null);
+    }
+
+    // kill removes the sidecar.
+    try h.runOk(&.{ "kill", "agx" });
+    try std.testing.expectError(error.FileNotFound, std.fs.cwd().access(sc_path, .{}));
+}
+
+test "agent: read --agent de-noises a saved transcript file" {
+    const alloc = std.testing.allocator;
+    var h = try Harness.init(alloc);
+    defer h.deinit();
+
+    const path = try std.fs.path.join(alloc, &.{ h.dir, "codex.jsonl" });
+    defer alloc.free(path);
+    try std.fs.cwd().writeFile(.{
+        .sub_path = path,
+        .data =
+        \\{"type":"event_msg","payload":{"type":"user_message","message":"hello CDX"}}
+        \\{"type":"event_msg","payload":{"type":"agent_message","message":"reply RPLY-TOKEN"}}
+        \\{"type":"event_msg","payload":{"type":"task_complete"}}
+        ,
+    });
+
+    const read = try h.run(&.{ "read", "--agent", "codex", path, "--json" });
+    defer alloc.free(read.stdout);
+    defer alloc.free(read.stderr);
+    try std.testing.expect(read.term.Exited == 0);
+    try std.testing.expect(std.mem.indexOf(u8, read.stdout, "RPLY-TOKEN") != null);
+    try std.testing.expect(std.mem.indexOf(u8, read.stdout, "hello CDX") != null);
+
+    // A non-transcript agent kind is a usage error, matching the read help.
+    try h.runExit(&.{ "read", "--agent", "bash", path }, 2);
+}
+
+test "agent: rename moves the sidecar so read still resolves it" {
+    const alloc = std.testing.allocator;
+    var h = try Harness.init(alloc);
+    defer h.deinit();
+
+    const new = try h.run(&.{ "new", "ag1", "--agent", "claude", "-d", "--", "sh", "-c", "cat" });
+    defer alloc.free(new.stdout);
+    defer alloc.free(new.stderr);
+    try std.testing.expect(new.term.Exited == 0);
+    try h.waitSessionUp("ag1");
+
+    try h.runOk(&.{ "rename", "ag1", "ag2" });
+
+    // The sidecar moved with the session; read resolves under the new name.
+    const read = try h.run(&.{ "read", "ag2", "--json" });
+    defer alloc.free(read.stdout);
+    defer alloc.free(read.stderr);
+    try std.testing.expect(read.term.Exited == 0);
+    try std.testing.expect(std.mem.indexOf(u8, read.stdout, "\"agent\":\"claude\"") != null);
+
+    const old_sc = try std.fs.path.join(alloc, &.{ h.dir, "ag1.agent" });
+    defer alloc.free(old_sc);
+    try std.testing.expectError(error.FileNotFound, std.fs.cwd().access(old_sc, .{}));
+
+    try h.runOk(&.{ "kill", "ag2" });
+}
+
 test "kill: peek immediately after kill reports no session" {
     const alloc = std.testing.allocator;
     var h = try Harness.init(alloc);
@@ -1281,7 +1379,7 @@ test "rename: moves a session to a new name" {
     try h.runExit(&.{ "rename", "after" }, 2);
 }
 
-// -- boo ui -------------------------------------------------------------------
+// -- moo ui -------------------------------------------------------------------
 
 fn uiSessionCount(h: *Harness) !usize {
     const result = try h.run(&.{ "ls", "--json" });
@@ -1671,12 +1769,12 @@ test "ui: quit with C-a d leaves sessions running and restores the terminal" {
     try ui.waitFor("survivor");
 
     try ui.send("\x01d");
-    try ui.waitFor("[boo ui closed]");
+    try ui.waitFor("[moo ui closed]");
     try std.testing.expectEqual(@as(u32, 0), try ui.waitExit());
 
     // The alternate screen is left before the exit notice prints.
     const leave = std.mem.lastIndexOf(u8, ui.output.items, "\x1b[?1049l").?;
-    const notice = std.mem.indexOf(u8, ui.output.items, "[boo ui closed]").?;
+    const notice = std.mem.indexOf(u8, ui.output.items, "[moo ui closed]").?;
     try std.testing.expect(leave < notice);
 
     const ls = try h.run(&.{"ls"});
@@ -1892,7 +1990,7 @@ test "ui: the focused session exiting hands focus to the next one" {
 
     // And it still shuts down cleanly.
     try ui.send("\x01d");
-    try ui.waitFor("[boo ui closed]");
+    try ui.waitFor("[moo ui closed]");
     try std.testing.expectEqual(@as(u32, 0), try ui.waitExit());
 }
 
@@ -2045,7 +2143,7 @@ test "ui: kitty-encoded C-a is the prefix, not session input" {
     // C-a d the way a kitty-mode terminal sends it quits the UI.
     try ui.send("\x1b[97;5u");
     try ui.send("d");
-    try ui.waitFor("[boo ui closed]");
+    try ui.waitFor("[moo ui closed]");
     try std.testing.expectEqual(@as(u32, 0), try ui.waitExit());
 
     // The keys were intercepted, not leaked into the session.
@@ -2147,7 +2245,7 @@ test "ui: modify-encoded C-a is the prefix, not session input" {
     // it quits the UI.
     try ui.send("\x1b[27;5;97~");
     try ui.send("d");
-    try ui.waitFor("[boo ui closed]");
+    try ui.waitFor("[moo ui closed]");
     try std.testing.expectEqual(@as(u32, 0), try ui.waitExit());
 
     // The keys were intercepted, not leaked into the session.

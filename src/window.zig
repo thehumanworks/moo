@@ -160,7 +160,7 @@ pub const Window = struct {
 
     fn effectXtversion(handler: *Stream.Handler) []const u8 {
         _ = handler;
-        return "boo " ++ @import("main.zig").version;
+        return "moo " ++ @import("main.zig").version;
     }
 
     /// Feed child output into the terminal emulator.
@@ -407,7 +407,7 @@ test "repaint reproduces the screen once output has scrolled" {
 
     // Eight lines scroll three into history, then a two-row frame
     // is drawn and everything below it erased: the screen is
-    // L4, "boo>", and three blank rows, cursor after the "boo>".
+    // L4, "moo>", and three blank rows, cursor after the "moo>".
     stream.nextSlice("L1\r\nL2\r\nL3\r\nL4\r\nL5\r\nL6\r\nL7\r\nL8");
     stream.nextSlice("\x1b[2;1Hboo>\x1b[0J");
 

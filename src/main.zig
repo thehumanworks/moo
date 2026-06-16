@@ -1,4 +1,4 @@
-//! boo: sessions that haunt your terminal. A GNU screen style
+//! moo: sessions that haunt your terminal. A GNU screen style
 //! terminal multiplexer built on libghostty (ghostty-vt).
 
 const std = @import("std");
@@ -6,6 +6,7 @@ const posix = std.posix;
 
 const client = @import("client.zig");
 const daemonpkg = @import("daemon.zig");
+const harness = @import("harness.zig");
 const help = @import("help.zig");
 const paths = @import("paths.zig");
 const protocol = @import("protocol.zig");
@@ -15,7 +16,7 @@ pub const version = "0.5.20";
 
 /// Route std.log through a filter. libghostty's VT stream parser logs
 /// unimplemented sequences at info level under the `stream` scope (e.g.
-/// "OSC 1 (change icon) received and ignored"). In `boo ui` the parser runs
+/// "OSC 1 (change icon) received and ignored"). In `moo ui` the parser runs
 /// in-process with stderr still attached to the user's terminal (unlike the
 /// daemon, which redirects stderr in startDaemon), so those lines paint over
 /// the rendered viewport and corrupt it. Drop info-and-below from `stream`;
@@ -34,21 +35,21 @@ fn filteredLog(
     std.log.defaultLog(level, scope, format, args);
 }
 
-/// Exit codes, documented in `boo help`.
+/// Exit codes, documented in `moo help`.
 const exit_runtime: u8 = 1;
 const exit_usage: u8 = 2;
 const exit_no_session: u8 = 3;
 const exit_timeout: u8 = 4;
 
 fn fail(code: u8, comptime fmt: []const u8, args: anytype) noreturn {
-    std.debug.print("boo: " ++ fmt ++ "\n", args);
+    std.debug.print("moo: " ++ fmt ++ "\n", args);
     posix.exit(code);
 }
 
 /// Usage errors point at the relevant help page.
 fn usageFail(comptime cmd: []const u8, comptime fmt: []const u8, args: anytype) noreturn {
-    const hint = if (cmd.len == 0) "boo help" else "boo help " ++ cmd;
-    std.debug.print("boo: " ++ fmt ++ " (run '" ++ hint ++ "')\n", args);
+    const hint = if (cmd.len == 0) "moo help" else "moo help " ++ cmd;
+    std.debug.print("moo: " ++ fmt ++ " (run '" ++ hint ++ "')\n", args);
     posix.exit(exit_usage);
 }
 
@@ -90,12 +91,13 @@ pub fn main() !void {
     if (eql(cmd, "ls") or eql(cmd, "list")) return cmdLs(alloc, rest);
     if (eql(cmd, "send")) return cmdSend(alloc, rest);
     if (eql(cmd, "peek")) return cmdPeek(alloc, rest);
+    if (eql(cmd, "read")) return cmdRead(alloc, rest);
     if (eql(cmd, "wait")) return cmdWait(alloc, rest);
     if (eql(cmd, "kill")) return cmdKill(alloc, rest);
     if (eql(cmd, "rename")) return cmdRename(alloc, rest);
     if (eql(cmd, "version") or eql(cmd, "-V") or eql(cmd, "--version")) return cmdVersion(alloc);
     if (eql(cmd, "help") or eql(cmd, "-h") or eql(cmd, "--help")) return cmdHelp(alloc, rest);
-    fail(exit_usage, "unknown command '{s}' (run 'boo help')", .{cmd});
+    fail(exit_usage, "unknown command '{s}' (run 'moo help')", .{cmd});
 }
 
 fn isHelpFlag(arg: []const u8) bool {
@@ -167,7 +169,7 @@ fn resolveSession(
     if (count > 1) fail(exit_no_session, "ambiguous session '{s}': matches {s}", .{
         want, joinNames(alloc, sessions),
     });
-    fail(exit_no_session, "no session matching '{s}' (run 'boo ls')", .{want});
+    fail(exit_no_session, "no session matching '{s}' (run 'moo ls')", .{want});
 }
 
 pub const SessionInfo = struct {
@@ -238,6 +240,7 @@ fn mustControl(
 fn cmdNew(alloc: std.mem.Allocator, args: []const [:0]const u8) !void {
     var name: ?[]const u8 = null;
     var detached = false;
+    var agent: ?harness.Agent = null;
     var cmd_argv: []const [:0]const u8 = &.{};
 
     var i: usize = 0;
@@ -250,6 +253,9 @@ fn cmdNew(alloc: std.mem.Allocator, args: []const [:0]const u8) !void {
             detached = true;
         } else if (isHelpFlag(arg)) {
             return printHelpPage("new");
+        } else if (flagValue("new", "--agent", args, &i)) |v| {
+            agent = harness.Agent.fromId(v) orelse
+                usageFail("new", "unknown agent '{s}' (claude, codex, pi, raw, bash, zsh)", .{v});
         } else if (arg.len > 0 and arg[0] == '-') {
             usageFail("new", "unknown flag '{s}'", .{arg});
         } else if (name == null) {
@@ -261,7 +267,7 @@ fn cmdNew(alloc: std.mem.Allocator, args: []const [:0]const u8) !void {
 
     const dir = try paths.socketDir(alloc);
     defer alloc.free(dir);
-    return createSession(alloc, dir, name, detached, @ptrCast(cmd_argv));
+    return createSession(alloc, dir, name, detached, agent, @ptrCast(cmd_argv));
 }
 
 fn createSession(
@@ -269,6 +275,7 @@ fn createSession(
     dir: []const u8,
     name_opt: ?[]const u8,
     detached: bool,
+    agent: ?harness.Agent,
     cmd_argv: []const []const u8,
 ) !void {
     var name_buf: [paths.max_name_len]u8 = undefined;
@@ -279,31 +286,46 @@ fn createSession(
     const sock = try paths.socketPath(alloc, dir, name);
     defer alloc.free(sock);
 
+    // Claim the socket before any agent setup, so a name clash can't clobber the
+    // existing session's sidecar or transcript store.
     const listen_fd = bindListen(alloc, sock) catch |err| switch (err) {
         error.SessionExists => fail(
             exit_runtime,
-            "session {s} already exists (run 'boo attach {s}')",
+            "session {s} already exists (run 'moo attach {s}')",
             .{ name, name },
         ),
         else => return err,
     };
 
+    // An agent harness augments the launch command (pinning a session id),
+    // supplies per-session env (e.g. CODEX_HOME), and records a sidecar so the
+    // transcript can be found by `moo read`. Allocations here live until the
+    // forked child execs; the short-lived parent never frees them.
+    var argv = cmd_argv;
+    var env_overrides: []const [2][]const u8 = &.{};
+    if (agent) |ag| {
+        const launch = prepareAgent(alloc, dir, name, ag, cmd_argv);
+        argv = launch.argv;
+        env_overrides = launch.env;
+    }
+
     // Fork the session daemon. The listening socket already exists, so
     // there is no race between daemon startup and the first attach.
-    // BOO_FOREGROUND=1 keeps the daemon in the foreground, which is
+    // MOO_FOREGROUND=1 keeps the daemon in the foreground, which is
     // useful for debugging.
-    if (posix.getenv("BOO_FOREGROUND") != null) {
+    if (posix.getenv("MOO_FOREGROUND") != null) {
         try daemonpkg.Daemon.run(alloc, .{
             .name = name,
             .socket_path = sock,
             .listen_fd = listen_fd,
-            .argv = cmd_argv,
+            .argv = argv,
+            .env_overrides = env_overrides,
         });
         return;
     }
     const pid = try posix.fork();
     if (pid == 0) {
-        runDaemon(alloc, name, sock, listen_fd, cmd_argv);
+        runDaemon(alloc, name, sock, listen_fd, argv, env_overrides);
     }
     posix.close(listen_fd);
 
@@ -313,6 +335,74 @@ fn createSession(
         return;
     }
     try attachLoop(alloc, dir, name);
+}
+
+const AgentLaunch = struct {
+    argv: []const []const u8,
+    env: []const [2][]const u8,
+};
+
+/// Prepare an agent-harness launch: augment argv, compute per-session launch
+/// isolation, and persist a sidecar so `moo read` can locate the transcript.
+/// Any failure falls back to the user's raw command — the session still starts,
+/// it just won't be transcript-tracked.
+fn prepareAgent(
+    alloc: std.mem.Allocator,
+    dir: []const u8,
+    name: []const u8,
+    agent: harness.Agent,
+    cmd_argv: []const []const u8,
+) AgentLaunch {
+    const fallback: AgentLaunch = .{ .argv = cmd_argv, .env = &.{} };
+    const store = paths.storeDir(alloc, dir, name) catch return fallback;
+    // Clear any store left by a prior same-named session, so transcript lookup
+    // (e.g. codex's newest-rollout glob) can only ever see this session's data.
+    std.fs.cwd().deleteTree(store) catch {};
+    const prepared = agent.prepare(alloc, cmd_argv, store) catch return fallback;
+
+    var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const cwd = posix.getcwd(&cwd_buf) catch ".";
+    const overrides = agent.launchOverrides(alloc, prepared.session_id, cwd, store) catch
+        harness.LaunchOverrides{};
+
+    writeSidecar(alloc, dir, name, .{
+        .agent = agent,
+        .session_id = prepared.session_id,
+        .session_store = overrides.session_store,
+        .cwd = cwd,
+    });
+    return .{ .argv = prepared.argv, .env = overrides.env };
+}
+
+fn writeSidecar(
+    alloc: std.mem.Allocator,
+    dir: []const u8,
+    name: []const u8,
+    sc: harness.Sidecar,
+) void {
+    const json = sc.toJson(alloc) catch return;
+    defer alloc.free(json);
+    const path = paths.sidecarPath(alloc, dir, name) catch return;
+    defer alloc.free(path);
+    std.fs.cwd().writeFile(.{ .sub_path = path, .data = json }) catch {};
+}
+
+/// Tear down a session's agent files: the transcript store recorded in its
+/// sidecar (authoritative — it survives a rename, where the store keeps the old
+/// name), plus the default-name store and the sidecar file. Best-effort; a
+/// non-agent session simply has none of these.
+fn removeAgentSession(alloc: std.mem.Allocator, dir: []const u8, name: []const u8) void {
+    if (paths.sidecarPath(alloc, dir, name)) |sc_path| {
+        defer alloc.free(sc_path);
+        if (readTranscript(alloc, sc_path)) |sc_data| {
+            defer alloc.free(sc_data);
+            if (harness.Sidecar.fromJson(alloc, sc_data)) |sc| {
+                defer sc.deinit(alloc);
+                if (sc.session_store) |store| std.fs.cwd().deleteTree(store) catch {};
+            } else |_| {}
+        }
+    } else |_| {}
+    paths.removeAgentFiles(alloc, dir, name);
 }
 
 fn cmdAttach(alloc: std.mem.Allocator, args: []const [:0]const u8) !void {
@@ -367,7 +457,7 @@ fn cmdUi(alloc: std.mem.Allocator, args: []const [:0]const u8) !void {
         error.NotATty => fail(exit_runtime, "ui requires a terminal", .{}),
         else => return err,
     };
-    std.debug.print("[boo ui closed]\n", .{});
+    std.debug.print("[moo ui closed]\n", .{});
 }
 
 fn cmdLs(alloc: std.mem.Allocator, args: []const [:0]const u8) !void {
@@ -663,6 +753,146 @@ fn cmdPeek(alloc: std.mem.Allocator, args: []const [:0]const u8) !void {
     try stdoutWrite(out.items);
 }
 
+/// Cap on transcript size read into memory (agent sessions are JSONL logs).
+const max_transcript_bytes: usize = 64 * 1024 * 1024;
+
+/// `moo read <session>` de-noises a live agent session's transcript, classifying
+/// what the agent is doing and printing the conversation. `moo read --agent
+/// <kind> <file>` does the same for a saved transcript on disk.
+fn cmdRead(alloc: std.mem.Allocator, args: []const [:0]const u8) !void {
+    var json = false;
+    var thinking = false;
+    var agent_kind: ?[]const u8 = null;
+    var file: ?[]const u8 = null;
+    var positional: ?[]const u8 = null;
+
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        const arg = args[i];
+        if (isHelpFlag(arg)) return printHelpPage("read");
+        if (std.mem.eql(u8, arg, "--json")) {
+            json = true;
+        } else if (std.mem.eql(u8, arg, "--thinking")) {
+            thinking = true;
+        } else if (flagValue("read", "--agent", args, &i)) |v| {
+            agent_kind = v;
+        } else if (flagValue("read", "--file", args, &i)) |v| {
+            file = v;
+        } else if (arg.len > 0 and arg[0] == '-') {
+            usageFail("read", "unknown flag '{s}'", .{arg});
+        } else if (positional == null) {
+            positional = arg;
+        } else {
+            usageFail("read", "unexpected argument '{s}'", .{arg});
+        }
+    }
+
+    // File mode: dump any saved transcript by path, no session needed.
+    if (agent_kind) |kind| {
+        const agent = harness.Agent.fromId(kind) orelse
+            usageFail("read", "unknown agent '{s}' (claude, codex, pi)", .{kind});
+        if (!agent.hasTranscript())
+            usageFail("read", "agent '{s}' has no transcript (claude, codex, pi)", .{kind});
+        const path = file orelse positional orelse
+            usageFail("read", "--agent needs a transcript file (a path, or --file)", .{});
+        const data = readTranscript(alloc, path) orelse
+            fail(exit_runtime, "cannot read transcript {s}", .{path});
+        defer alloc.free(data);
+        const dump = if (json)
+            try agent.dumpJson(alloc, data, thinking)
+        else
+            try agent.dumpText(alloc, data, thinking);
+        defer alloc.free(dump);
+        try emitDump(dump, json);
+        return;
+    }
+
+    // Session mode: resolve a live session, read its sidecar, locate transcript.
+    const want = positional orelse usageFail("read", "a session name is required", .{});
+    const dir = try paths.socketDir(alloc);
+    defer alloc.free(dir);
+    const name = try resolveSession(alloc, dir, want);
+    defer alloc.free(name);
+
+    const sc_path = try paths.sidecarPath(alloc, dir, name);
+    defer alloc.free(sc_path);
+    const sc_data = readTranscript(alloc, sc_path) orelse fail(
+        exit_runtime,
+        "session {s} was not started with --agent (nothing to read)",
+        .{name},
+    );
+    defer alloc.free(sc_data);
+    const sc = harness.Sidecar.fromJson(alloc, sc_data) catch
+        fail(exit_runtime, "corrupt agent sidecar for {s}", .{name});
+    defer sc.deinit(alloc);
+
+    // The transcript may not exist yet (e.g. pi's lazy file before the first
+    // reply); treat that as empty, which classifies as not-idle.
+    const t_path = sc.agent.transcriptPath(alloc, sc) catch null;
+    defer if (t_path) |p| alloc.free(p);
+    const data = if (t_path) |p| (readTranscript(alloc, p) orelse try alloc.dupe(u8, "")) else try alloc.dupe(u8, "");
+    defer alloc.free(data);
+
+    var report = try sc.agent.detect(alloc, data);
+    defer report.deinit(alloc);
+
+    if (json) {
+        var out: std.ArrayList(u8) = .empty;
+        defer out.deinit(alloc);
+        try out.appendSlice(alloc, "{\"session\":");
+        try appendJsonString(alloc, &out, name);
+        try out.appendSlice(alloc, ",\"agent\":");
+        try appendJsonString(alloc, &out, sc.agent.id());
+        try out.appendSlice(alloc, ",\"state\":");
+        try appendJsonString(alloc, &out, report.state.asStr());
+        if (report.stop_reason) |s| {
+            try out.appendSlice(alloc, ",\"stop_reason\":");
+            try appendJsonString(alloc, &out, s);
+        }
+        if (report.detail) |d| {
+            try out.appendSlice(alloc, ",\"detail\":");
+            try appendJsonString(alloc, &out, d);
+        }
+        const tail = try std.fmt.allocPrint(alloc, ",\"messages\":{d},\"transcript\":", .{report.messages});
+        defer alloc.free(tail);
+        try out.appendSlice(alloc, tail);
+        const arr = try sc.agent.dumpJson(alloc, data, thinking);
+        defer alloc.free(arr);
+        try out.appendSlice(alloc, std.mem.trimRight(u8, arr, " \n"));
+        try out.appendSlice(alloc, "}\n");
+        return stdoutWrite(out.items);
+    }
+
+    // Human view: a one-line status header, then the conversation.
+    var header: std.ArrayList(u8) = .empty;
+    defer header.deinit(alloc);
+    try header.print(alloc, "{s} · {s} · {s}", .{ name, sc.agent.id(), report.state.asStr() });
+    if (report.stop_reason) |s| try header.print(alloc, " ({s})", .{s});
+    if (report.detail) |d| try header.print(alloc, " \u{2014} {s}", .{d});
+    try header.print(alloc, " · {d} message{s}\n\n", .{ report.messages, if (report.messages == 1) "" else "s" });
+    try stdoutWrite(header.items);
+
+    const text = try sc.agent.dumpText(alloc, data, thinking);
+    defer alloc.free(text);
+    try emitDump(text, false);
+}
+
+/// Read a transcript/sidecar file fully into memory; null on any error
+/// (missing, unreadable). Caller frees.
+fn readTranscript(alloc: std.mem.Allocator, path: []const u8) ?[]u8 {
+    return std.fs.cwd().readFileAlloc(alloc, path, max_transcript_bytes) catch null;
+}
+
+/// Print a de-noised dump, ensuring a trailing newline for the human view.
+fn emitDump(dump: []const u8, json: bool) !void {
+    if (dump.len == 0) {
+        if (!json) try stdoutWrite("(empty transcript)\n");
+        return;
+    }
+    try stdoutWrite(dump);
+    if (dump[dump.len - 1] != '\n') try stdoutWrite("\n");
+}
+
 /// How long output must stay quiet for `wait --idle` to fire.
 const idle_settle_ms: i64 = 2000;
 
@@ -758,9 +988,11 @@ fn cmdKill(alloc: std.mem.Allocator, args: []const [:0]const u8) !void {
             defer alloc.free(sock);
             const result = client.control(alloc, sock, &.{"quit"}) catch {
                 std.fs.cwd().deleteFile(sock) catch {};
+                removeAgentSession(alloc, dir, name);
                 continue;
             };
             alloc.free(result.text);
+            removeAgentSession(alloc, dir, name);
             try stdoutPrint(alloc, "{s}\n", .{name});
         }
         return;
@@ -772,6 +1004,7 @@ fn cmdKill(alloc: std.mem.Allocator, args: []const [:0]const u8) !void {
     const result = try mustControl(alloc, dir, name, &.{"quit"});
     defer alloc.free(result.text);
     if (!result.ok) fail(exit_runtime, "{s}", .{result.text});
+    removeAgentSession(alloc, dir, name);
 }
 
 fn cmdRename(alloc: std.mem.Allocator, args: []const [:0]const u8) !void {
@@ -805,7 +1038,7 @@ fn cmdRename(alloc: std.mem.Allocator, args: []const [:0]const u8) !void {
 }
 
 fn cmdVersion(alloc: std.mem.Allocator) !void {
-    try stdoutPrint(alloc, "boo {s}\n", .{version});
+    try stdoutPrint(alloc, "moo {s}\n", .{version});
 }
 
 fn cmdHelp(alloc: std.mem.Allocator, args: []const [:0]const u8) !void {
@@ -905,15 +1138,16 @@ fn runDaemon(
     sock: []const u8,
     listen_fd: posix.fd_t,
     argv: []const []const u8,
+    env_overrides: []const [2][]const u8,
 ) noreturn {
     _ = posix.setsid() catch {};
 
-    // Detach stdio. Keep stderr pointed at BOO_LOG if set so std.log
+    // Detach stdio. Keep stderr pointed at MOO_LOG if set so std.log
     // output is preserved for debugging.
     const devnull = posix.open("/dev/null", .{ .ACCMODE = .RDWR }, 0) catch posix.exit(1);
     posix.dup2(devnull, 0) catch {};
     posix.dup2(devnull, 1) catch {};
-    if (posix.getenv("BOO_LOG")) |log_path| blk: {
+    if (posix.getenv("MOO_LOG")) |log_path| blk: {
         const fd = posix.open(log_path, .{
             .ACCMODE = .WRONLY,
             .CREAT = true,
@@ -931,6 +1165,7 @@ fn runDaemon(
         .socket_path = sock,
         .listen_fd = listen_fd,
         .argv = argv,
+        .env_overrides = env_overrides,
     }) catch |err| {
         std.log.err("daemon failed: {}", .{err});
         posix.exit(1);
@@ -1029,4 +1264,5 @@ test {
     _ = @import("client.zig");
     _ = @import("help.zig");
     _ = @import("ui.zig");
+    _ = @import("harness.zig");
 }

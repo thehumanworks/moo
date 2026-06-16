@@ -31,7 +31,7 @@
         # build.zig.zon change, update outputHash (set it to
         # lib.fakeHash, build, and copy the hash from the error).
         deps = pkgs.stdenvNoCC.mkDerivation {
-          pname = "boo-deps";
+          pname = "moo-deps";
           inherit version;
           src = ./.;
 
@@ -62,8 +62,8 @@
           outputHash = "sha256-2dZHdZoAap25va9ka2SN5QqoQ2xcZITJKNzwfOGmvus=";
         };
 
-        boo = pkgs.stdenv.mkDerivation {
-          pname = "boo";
+        moo = pkgs.stdenv.mkDerivation {
+          pname = "moo";
           inherit version;
           src = ./.;
 
@@ -87,17 +87,17 @@
 
           meta = {
             description = "Sessions that haunt your terminal. A GNU screen style terminal multiplexer built on libghostty";
-            homepage = "https://github.com/coder/boo";
+            homepage = "https://github.com/thehumanworks/moo";
             license = lib.licenses.mit;
-            mainProgram = "boo";
+            mainProgram = "moo";
             platforms = lib.platforms.linux ++ lib.platforms.darwin;
           };
         };
       in
       {
         packages = {
-          default = boo;
-          inherit boo;
+          default = moo;
+          inherit moo;
         };
 
         devShells.default = pkgs.mkShell {

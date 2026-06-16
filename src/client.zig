@@ -175,7 +175,7 @@ pub fn attach(alloc: std.mem.Allocator, socket_path: []const u8) !Outcome {
 }
 
 /// Configure a termios for raw byte-at-a-time input. Shared with the
-/// boo ui client, which manages its own terminal lifecycle.
+/// moo ui client, which manages its own terminal lifecycle.
 pub fn rawMode(t: *posix.termios) void {
     t.iflag.IGNBRK = false;
     t.iflag.BRKINT = false;
@@ -246,7 +246,7 @@ const drain_tail_ms = 100;
 const drain_cap_ms = 1500;
 
 /// Restore a raw client terminal: screen restore, input drain, then
-/// the mode switch. Shared with boo ui, whose quit has the same held
+/// the mode switch. Shared with moo ui, whose quit has the same held
 /// command key and kitty release tail to absorb.
 pub fn restoreTty(
     tty: posix.fd_t,

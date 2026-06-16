@@ -24,6 +24,9 @@ pub const Options = struct {
     socket_path: []const u8,
     listen_fd: posix.fd_t,
     argv: []const []const u8,
+    /// Extra environment variables (key, value) applied to the child before
+    /// exec, e.g. an agent harness's per-session CODEX_HOME. Default: none.
+    env_overrides: []const [2][]const u8 = &.{},
     rows: u16 = 24,
     cols: u16 = 80,
 };
@@ -106,7 +109,7 @@ pub const Daemon = struct {
             .flags = 0,
         }, null);
 
-        self.win = try createWindow(self.alloc, opts.name, opts.argv, self.rows, self.cols);
+        self.win = try createWindow(self.alloc, opts.name, opts.argv, opts.env_overrides, self.rows, self.cols);
 
         try self.loop();
     }
@@ -466,6 +469,11 @@ pub const Daemon = struct {
             return;
         };
 
+        // Move the agent sidecar to the new name so `moo read` keeps working.
+        // The transcript store is referenced by absolute path inside the
+        // sidecar, so it stays put. Best-effort: a non-agent session has none.
+        renameSidecar(self.alloc, dir, self.opts.name, new_name);
+
         if (self.owned_name) |n| self.alloc.free(n);
         if (self.owned_socket_path) |p| self.alloc.free(p);
         self.owned_name = new_owned_name;
@@ -474,6 +482,15 @@ pub const Daemon = struct {
         self.opts.socket_path = new_path;
         log.info("renamed to {s}", .{new_name});
         conn.send(.ok, "");
+    }
+
+    /// Best-effort move of `<old>.agent` → `<new>.agent` beside the socket.
+    fn renameSidecar(alloc: std.mem.Allocator, dir: []const u8, old: []const u8, new: []const u8) void {
+        const old_path = paths.sidecarPath(alloc, dir, old) catch return;
+        defer alloc.free(old_path);
+        const new_path = paths.sidecarPath(alloc, dir, new) catch return;
+        defer alloc.free(new_path);
+        std.fs.cwd().rename(old_path, new_path) catch {};
     }
 
     fn serviceWindow(self: *Daemon, win: *Window, buf: []u8) void {
@@ -556,13 +573,17 @@ pub const Daemon = struct {
         alloc: std.mem.Allocator,
         session_name: []const u8,
         argv: []const []const u8,
+        env_overrides: []const [2][]const u8,
         rows: u16,
         cols: u16,
     ) !*Window {
         var env = try std.process.getEnvMap(alloc);
         defer env.deinit();
         try env.put("TERM", "xterm-256color");
-        try env.put("BOO", session_name);
+        try env.put("MOO", session_name);
+        // Harness-provided per-session vars (e.g. CODEX_HOME) override inherited
+        // ones; applied last so an adapter always wins.
+        for (env_overrides) |pair| try env.put(pair[0], pair[1]);
 
         var default_argv: [1][]const u8 = .{env.get("SHELL") orelse "/bin/sh"};
         const child_argv: []const []const u8 = if (argv.len > 0) argv else &default_argv;

@@ -9,11 +9,11 @@
 
 Sessions that haunt your terminal.
 
-[Install](#install) | [Usage](#usage) | [Automation](#automation) | [Why](#why-boo) | [Architecture](#architecture)
+[Install](#install) | [Usage](#usage) | [Automation](#automation) | [Why](#why-moo) | [Architecture](#architecture)
 
-[![ci](https://github.com/coder/boo/actions/workflows/ci.yml/badge.svg)](https://github.com/coder/boo/actions/workflows/ci.yml)
-[![release](https://img.shields.io/github/v/release/coder/boo)](https://github.com/coder/boo/releases/latest)
-[![license](https://img.shields.io/github/license/coder/boo)](./LICENSE)
+[![ci](https://github.com/thehumanworks/moo/actions/workflows/ci.yml/badge.svg)](https://github.com/thehumanworks/moo/actions/workflows/ci.yml)
+[![release](https://img.shields.io/github/v/release/thehumanworks/moo)](https://github.com/thehumanworks/moo/releases/latest)
+[![license](https://img.shields.io/github/license/thehumanworks/moo)](./LICENSE)
 [![discord](https://img.shields.io/discord/747933592273027093?label=discord)](https://discord.gg/coder)
 
 </div>
@@ -23,7 +23,7 @@ A GNU `screen` style terminal multiplexer built on
 (`libghostty-vt`), written in Zig.
 
 Every session's output is parsed through Ghostty's terminal emulation
-core, so boo always knows the exact screen state of every session:
+core, so moo always knows the exact screen state of every session:
 contents, styles, cursor, scrollback, and terminal modes. That state is
 used to rehydrate your terminal on attach, to answer terminal queries
 for detached sessions, and to let scripts and AI agents read the screen
@@ -31,10 +31,11 @@ exactly as a human would see it.
 
 ## Features
 
-- Sessions that survive disconnects: detach with `Ctrl-A d`, reattach with `boo attach`.
-- A full-screen session manager: `boo ui` lists sessions in a sidebar.
+- Sessions that survive disconnects: detach with `Ctrl-A d`, reattach with `moo attach`.
+- A full-screen session manager: `moo ui` lists sessions in a sidebar.
 - Faithful redraws from libghostty terminal state, including SGR styles, cursor position, scrolling regions, window title, and terminal modes.
 - Agent-friendly automation primitives: `send`, `peek`, `wait`, and `--json` output, all usable without a TTY.
+- Coding-agent harnesses: `--agent claude|codex|pi` wraps an agent so `moo read` can de-noise its transcript and report whether it is idle, working, or waiting on you.
 
 <video src="https://github.com/user-attachments/assets/d9310edd-68e8-4bc2-aac5-80f1da431dae" autoplay="autoplay" loop muted playsinline></video>
 
@@ -43,32 +44,32 @@ exactly as a human would see it.
 For Linux and macOS:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/coder/boo/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/thehumanworks/moo/main/install.sh | sh
 ```
 
-Pre-built binaries are published on the [releases page](https://github.com/coder/boo/releases). Set `BOO_VERSION` to pin a release and `BOO_INSTALL_DIR` to change the
+Pre-built binaries are published on the [releases page](https://github.com/thehumanworks/moo/releases). Set `MOO_VERSION` to pin a release and `MOO_INSTALL_DIR` to change the
 install location (default: `/usr/local/bin` when writable, otherwise
 `~/.local/bin`).
 
 ## Usage
 
 ```sh
-boo new                    # new session running $SHELL, attached
-boo new work               # named session
-boo new work -d -- make    # create detached, running a command
-boo ui                     # manage sessions in a full-screen UI (alias: i)
-boo ls                     # list sessions
-boo attach work            # reattach (alias: at, a)
-boo rename work api        # rename a session
-boo kill work              # end a session
-boo kill --all             # end every session
+moo new                    # new session running $SHELL, attached
+moo new work               # named session
+moo new work -d -- make    # create detached, running a command
+moo ui                     # manage sessions in a full-screen UI (alias: i)
+moo ls                     # list sessions
+moo attach work            # reattach (alias: at, a)
+moo rename work api        # rename a session
+moo kill work              # end a session
+moo kill --all             # end every session
 ```
 
-With no name, `boo new` names the session after the current directory,
+With no name, `moo new` names the session after the current directory,
 falling back to the process id when that name is taken or unusable.
 
-Run `boo help` for the full overview, `boo help <command>` for flags
-and examples, and `boo help --all` to print every help page at once.
+Run `moo help` for the full overview, `moo help <command>` for flags
+and examples, and `moo help --all` to print every help page at once.
 
 ### Key bindings (prefix `Ctrl-a`)
 
@@ -81,20 +82,20 @@ Bindings follow GNU screen's defaults, including the `C-x` variants
 | `C-a l`, `C-a C-l` | redraw                     |
 | `C-a a`   | send a literal `C-a`                |
 
-`boo ui` adds additional keybinds for switching, resizing and hiding the sidebar, creating sessions, and killing them.
+`moo ui` adds additional keybinds for switching, resizing and hiding the sidebar, creating sessions, and killing them.
 
 ### Automation
 
-Everything except `attach` works without a terminal, which makes boo a
+Everything except `attach` works without a terminal, which makes moo a
 natural sandbox for scripts and AI agents driving interactive programs.
 The canonical loop:
 
 ```sh
-boo new build -d -- bash               # 1. headless session
-boo send build --text 'make' --enter   # 2. type into it
-boo wait build --idle                  # 3. let output settle
-boo peek build --scrollback            # 4. read the screen
-boo kill build                         # 5. clean up
+moo new build -d -- bash               # 1. headless session
+moo send build --text 'make' --enter   # 2. type into it
+moo wait build --idle                  # 3. let output settle
+moo peek build --scrollback            # 4. read the screen
+moo kill build                         # 5. clean up
 ```
 
 - **Reading state**: `peek` prints the rendered screen reconstructed
@@ -113,15 +114,56 @@ boo kill build                         # 5. clean up
 - **Exit codes**: `0` success, `1` error, `2` usage error, `3` no such
   session, `4` wait timed out.
 
-See `boo help automation` for the full page.
+See `moo help automation` for the full page.
 
-## Why boo?
+### Agents
 
-GNU screen works the same way boo does, architecturally: it parses all
+moo can wrap a coding agent (Claude Code, `codex`, `pi`) so you can read its
+*transcript*, not just its screen. `--agent` launches the agent's interactive
+TUI, augments the command so the transcript is locatable (a pinned session id,
+or an isolated home), and records a small sidecar next to the session socket.
+`moo read` then turns that transcript into a de-noised conversation plus a
+one-line status of what the agent is doing.
+
+```sh
+moo new bot --agent claude -d              # wrap Claude Code, detached
+moo send bot --text 'fix the build' --enter
+moo wait bot --idle                        # coarse wait: output settles
+moo read bot                               # status + de-noised conversation
+moo read bot --json | jq .state            # or structured, for scripts
+moo kill bot                               # ends it; drops the sidecar
+```
+
+`wait --idle` watches the rendered screen and fires once output has been quiet
+for two seconds, a convenient but coarse proxy. For an authoritative
+turn-completion signal, poll the transcript state instead, e.g. until
+`moo read bot --json | jq -r .state` reports `idle`.
+
+- **Reading the transcript**: `read` classifies the session from the agent's
+  own JSONL log, independent of what the TUI is drawing: `idle` (turn finished),
+  `running` (generating or running tools), `waiting_for_input` (Claude asked via
+  a native question/plan tool), `truncated`, or `unknown` (no transcript yet).
+  The conversation is de-noised down to human prompts, agent replies, and tool
+  calls; `--thinking` adds reasoning blocks; `--json` emits structured output.
+- **Reading a saved log**: `moo read --agent <agent> <file>` de-noises any
+  transcript file directly, no session required.
+
+| capability          | claude | codex | pi  |
+|---------------------|:------:|:-----:|:---:|
+| read transcript     |  yes   |  yes  | yes |
+| thinking blocks     |  yes   |  no   | yes |
+| `waiting_for_input` |  yes   |  no   | no  |
+
+Approvals and permission prompts that never reach disk read as `running` rather
+than a dedicated waiting state. See `moo help agents` for the full page.
+
+## Why moo?
+
+GNU screen works the same way moo does, architecturally: it parses all
 output through its own built-in terminal emulator and redraws from
 that state on reattach. But that emulator is decades old and lags far
 behind what modern programs emit. Whatever it doesn't understand gets
-dropped or mangled on redraw. boo swaps that layer for `libghostty-vt`,
+dropped or mangled on redraw. moo swaps that layer for `libghostty-vt`,
 Ghostty's VT core, so the saved state matches what your terminal would
 actually display, and terminal queries are answered while detached so
 TUIs don't hang unattended.
@@ -130,16 +172,16 @@ Scripting is the other win: `send`, `peek --json`, and
 `wait --text`/`--idle` instead of `-X stuff`, hardcopy files, and
 sleep loops.
 
-tmux is great, it just solves a different problem. boo keeps screen's
+tmux is great, it just solves a different problem. moo keeps screen's
 model by design: sessions, a prefix key, and nothing else to learn.
-One session per task, with `boo ui` to juggle them.
+One session per task, with `moo ui` to juggle them.
 
 ## Contributing
 
 Requires [Zig](https://ziglang.org) 0.15.2.
 
 ```sh
-zig build                       # binary in zig-out/bin/boo
+zig build                       # binary in zig-out/bin/moo
 zig build test                  # unit tests
 zig build test-integration     # end-to-end tests on a real PTY
 zig build test-all             # everything
@@ -149,12 +191,12 @@ The libghostty dependency is fetched and built from source
 automatically (pinned in `build.zig.zon`).
 
 With Nix, `nix develop` opens a shell with the right Zig version, and
-`nix build` builds the package to `./result/bin/boo`.
+`nix build` builds the package to `./result/bin/moo`.
 
 ## Architecture
 
 ```
-your terminal <-(raw tty)-> boo client <-(unix socket)-> session daemon
+your terminal <-(raw tty)-> moo client <-(unix socket)-> session daemon
                                                          `- PTY + ghostty-vt Terminal
 ```
 
@@ -176,15 +218,15 @@ This is a young project, not a drop-in GNU screen replacement:
 
 - One attached client per session (attaching steals); no `-x` sharing.
 - One window per session: no splits or tabs inside a session. Run one
-  session per task and juggle them with `boo ui`.
+  session per task and juggle them with `moo ui`.
 - The `C-a` prefix is not yet configurable, and pasted bytes containing
   `0x01` are interpreted as the prefix (GNU screen has the same quirk;
-  `boo ui` is immune thanks to bracketed paste).
+  `moo ui` is immune thanks to bracketed paste).
 - Sessions run with `TERM=xterm-256color`.
 
 ## Support
 
-Feel free to [open an issue](https://github.com/coder/boo/issues/new)
+Feel free to [open an issue](https://github.com/thehumanworks/moo/issues/new)
 if you have questions, run into bugs, or have a feature request.
 
 ## License

@@ -1,9 +1,9 @@
-//! boo ui: a full-screen session manager. Sessions are listed in a
+//! moo ui: a full-screen session manager. Sessions are listed in a
 //! left sidebar; the focused session renders in a viewport on the
 //! right. Sessions can be created, focused, and killed with the mouse
 //! or with C-a key bindings.
 //!
-//! Unlike `boo attach`, session output is never passed through to the
+//! Unlike `moo attach`, session output is never passed through to the
 //! terminal raw: absolute cursor addressing, scrolling, and clears
 //! from the session would trample the sidebar. Instead the UI is a
 //! client-side compositor. Output of the focused session feeds a
@@ -754,7 +754,7 @@ pub const View = struct {
 
     fn effectXtversion(handler: *Stream.Handler) []const u8 {
         _ = handler;
-        return "boo " ++ @import("main.zig").version;
+        return "moo " ++ @import("main.zig").version;
     }
 
     pub fn feedOutput(self: *View, bytes: []const u8) void {
@@ -987,7 +987,7 @@ const enter_sequence =
     "\x1b[?1004h" ++ // focus reporting
     "\x1b[?2004h" ++ // bracketed paste
     "\x1b[=0;1u\x1b[>4;0m" ++ // keyboard protocols off until a view sets them
-    "\x1b]2;boo ui\x07"; // window title
+    "\x1b]2;moo ui\x07"; // window title
 
 /// reset_state_sequence turns every mode above back off.
 const restore_sequence = windowpkg.reset_state_sequence ++ "\x1b[?1049l";
@@ -1034,9 +1034,9 @@ pub fn run(alloc: std.mem.Allocator, dir: []const u8) !void {
 
     const ws = ptypkg.getSize(tty) catch ptypkg.makeWinsize(24, 80);
     ui.layout = .init(ws.row, ws.col);
-    // Running inside a boo session: never attach the session hosting
+    // Running inside a moo session: never attach the session hosting
     // this UI, or its output would feed back into itself forever.
-    ui.host_name = posix.getenv("BOO");
+    ui.host_name = posix.getenv("MOO");
 
     try ui.refreshSessions();
     if (ui.selected == null) ui.selectInitial();
@@ -1087,7 +1087,7 @@ const Ui = struct {
     sessions: std.ArrayList(Entry) = .empty,
     /// Selected (and focused) session index, when any session exists.
     selected: ?usize = null,
-    /// The session this UI itself runs inside, when nested in boo.
+    /// The session this UI itself runs inside, when nested in moo.
     host_name: ?[]const u8 = null,
     /// Name of the previously focused session for C-a C-a toggling.
     last_name: ?[]u8 = null,
@@ -2992,7 +2992,7 @@ const Ui = struct {
         try out.appendSlice(self.alloc, sgr_reset);
     }
 
-    /// The boo wordmark and its ghost, shown when nothing is focused.
+    /// The moo wordmark and its ghost, shown when nothing is focused.
     const ghost_art = [_][]const u8{
         " _                     .-.",
         "| |__   ___   ___     (o o)",
