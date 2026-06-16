@@ -1,25 +1,23 @@
 <div align="center">
 <pre>
- _                     .-.
- | |__   ___   ___     (o o)
- | '_ \ / _ \ / _ \    | O \
-  | |_) | (_) | (_) |    \   \
-   |_.__/ \___/ \___/      `~~~'
+ __  __   ___   ___ 
+|  \/  | / _ \ / _ \
+| |\/| || (_) | (_) |
+|_|  |_||\___/ \___/ 
+
+        \   ^__^
+         \  (oo)\_______
+            (__)\       )\/\
+                ||----w |
+                ||     ||
 </pre>
 
 Sessions that haunt your terminal.
 
-[Install](#install) | [Usage](#usage) | [Automation](#automation) | [Why](#why-moo) | [Architecture](#architecture)
-
-[![ci](https://github.com/thehumanworks/moo/actions/workflows/ci.yml/badge.svg)](https://github.com/thehumanworks/moo/actions/workflows/ci.yml)
-[![release](https://img.shields.io/github/v/release/thehumanworks/moo)](https://github.com/thehumanworks/moo/releases/latest)
-[![license](https://img.shields.io/github/license/thehumanworks/moo)](./LICENSE)
-[![discord](https://img.shields.io/discord/747933592273027093?label=discord)](https://discord.gg/coder)
-
 </div>
 
-A GNU `screen` style terminal multiplexer built on
-[libghostty](https://github.com/ghostty-org/ghostty)
+A GNU `screen` style terminal multiplexer based on coder/boo, built on
+libghostty
 (`libghostty-vt`), written in Zig.
 
 Every session's output is parsed through Ghostty's terminal emulation
@@ -37,17 +35,15 @@ exactly as a human would see it.
 - Agent-friendly automation primitives: `send`, `peek`, `wait`, and `--json` output, all usable without a TTY.
 - Coding-agent harnesses: `--agent claude|codex|pi` wraps an agent so `moo read` can de-noise its transcript and report whether it is idle, working, or waiting on you.
 
-<video src="https://github.com/user-attachments/assets/d9310edd-68e8-4bc2-aac5-80f1da431dae" autoplay="autoplay" loop muted playsinline></video>
-
 ## Install
 
 For Linux and macOS:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/thehumanworks/moo/main/install.sh | sh
+./install.sh
 ```
 
-Pre-built binaries are published on the [releases page](https://github.com/thehumanworks/moo/releases). Set `MOO_VERSION` to pin a release and `MOO_INSTALL_DIR` to change the
+Pre-built binaries are published on the releases page. Set `MOO_VERSION` to pin a release and `MOO_INSTALL_DIR` to change the
 install location (default: `/usr/local/bin` when writable, otherwise
 `~/.local/bin`).
 
@@ -178,7 +174,7 @@ One session per task, with `moo ui` to juggle them.
 
 ## Contributing
 
-Requires [Zig](https://ziglang.org) 0.15.2.
+Requires Zig 0.15.2.
 
 ```sh
 zig build                       # binary in zig-out/bin/moo
@@ -226,9 +222,8 @@ This is a young project, not a drop-in GNU screen replacement:
 
 ## Support
 
-Feel free to [open an issue](https://github.com/thehumanworks/moo/issues/new)
-if you have questions, run into bugs, or have a feature request.
+Feel free to open an issue if you have questions, run into bugs, or have a feature request.
 
 ## License
 
-[MIT](LICENSE). Ghostty itself is MIT licensed.
+MIT. Ghostty itself is MIT licensed.
