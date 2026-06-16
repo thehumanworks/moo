@@ -35,8 +35,9 @@ pub const Protocols = struct {
 pub const Command = union(enum) {
     /// Bytes to forward to the window.
     forward: []const u8,
-    /// The command key that triggered the detach; C-d (0x04) marks
-    /// the detach as EOF-dangerous for the client's input drain.
+    /// The command key that triggered the detach. The daemon maps
+    /// C-d to "detached-eof" and other command keys to
+    /// "detached-held" so the client uses the long post-detach drain.
     detach: u8,
     redraw,
     unknown: u8,

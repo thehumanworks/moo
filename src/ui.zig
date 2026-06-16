@@ -1604,11 +1604,10 @@ const Ui = struct {
             'k', 0x0b => self.confirmKill(),
             'r', 0x12 => self.startRename(),
             'g', 0x07 => self.startGoto(),
-            'd', 'q' => self.quitting = true,
-            0x04 => {
-                // A held C-a C-d may still be repeating C-d when the
-                // terminal is handed back; mark the restore drain
-                // EOF-dangerous, like a detach from a plain attach.
+            'd', 'q', 0x04 => {
+                // A held command key may still be repeating when the
+                // terminal is handed back; use the long restore drain,
+                // like a detach from a plain attach.
                 self.eof_guard = true;
                 self.quitting = true;
             },

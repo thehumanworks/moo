@@ -312,9 +312,11 @@ pub const Daemon = struct {
             },
             .detach => |byte| self.detachConn(
                 conn,
-                // A C-d triggered detach warns the client that the
-                // user may be holding the byte that EOFs shells.
-                if (byte == 0x04) "detached-eof" else "detached",
+                // A command-key detach may leave the key held: C-d
+                // EOFs shells, and a held plain `d` garbles the prompt.
+                // detach_req keeps the plain "detached" payload so the
+                // client can use the shorter drain guard.
+                if (byte == 0x04) "detached-eof" else "detached-held",
             ),
             .redraw => try self.repaintTo(conn),
             .unknown => |byte| if (std.ascii.isPrint(byte))

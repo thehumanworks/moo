@@ -75,8 +75,8 @@ pub fn attach(alloc: std.mem.Allocator, socket_path: []const u8) !Outcome {
     var raw = saved;
     rawMode(&raw);
     try posix.tcsetattr(tty, .FLUSH, raw);
-    // Set by the outcome paths below when a held C-d may still be
-    // repeating; read by the deferred restore.
+    // Set by the outcome paths below when a held command key may
+    // still be repeating; read by the deferred restore.
     var eof_guard = false;
     defer restoreTty(tty, saved, restore_sequence, eof_guard);
     try protocol.writeAll(1, enter_sequence);
@@ -155,7 +155,9 @@ pub fn attach(alloc: std.mem.Allocator, socket_path: []const u8) !Outcome {
                     .output => try protocol.writeAll(1, msg.payload),
                     .detached => {
                         if (std.mem.eql(u8, msg.payload, "stolen")) return .stolen;
-                        if (std.mem.eql(u8, msg.payload, "detached-eof")) {
+                        if (std.mem.eql(u8, msg.payload, "detached-eof") or
+                            std.mem.eql(u8, msg.payload, "detached-held"))
+                        {
                             eof_guard = true;
                         }
                         return .detached;
@@ -236,11 +238,14 @@ fn drainInput(tty: posix.fd_t, guard_ms: i64) void {
     }
 }
 
-/// Guard for detaches with no reason to expect a held key.
+/// Guard for detaches with no reason to expect a held key, such as
+/// SIGTERM/SIGHUP detach_req.
 const drain_guard_short_ms = 300;
-/// Guard for flows where the user plausibly holds C-d, the byte that
-/// EOFs a cooked-mode shell: a C-a C-d detach and a session that ends
-/// while attached (often a C-d typed at the session's own shell).
+/// Guard for flows where the user plausibly holds the command key:
+/// C-a d/C-a C-d detaches and sessions that end while attached
+/// (often a C-d typed at the session's own shell). Keyboard repeat
+/// delays reach ~660ms, and leaving the alternate screen can defer
+/// the first legacy repeat until after the short guard would expire.
 const drain_guard_eof_ms = 800;
 const drain_tail_ms = 100;
 const drain_cap_ms = 1500;
