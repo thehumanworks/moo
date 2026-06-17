@@ -89,6 +89,7 @@ pub fn main() !void {
     if (eql(cmd, "attach") or eql(cmd, "at") or eql(cmd, "a")) return cmdAttach(alloc, rest);
     if (eql(cmd, "ui") or eql(cmd, "i")) return cmdUi(alloc, rest);
     if (eql(cmd, "ls") or eql(cmd, "list")) return cmdLs(alloc, rest);
+    if (eql(cmd, "ws")) return cmdWs(alloc, rest);
     if (eql(cmd, "send")) return cmdSend(alloc, rest);
     if (eql(cmd, "peek")) return cmdPeek(alloc, rest);
     if (eql(cmd, "read")) return cmdRead(alloc, rest);
@@ -123,6 +124,23 @@ fn flagValue(
         return arg[flag.len + 1 ..];
     }
     return null;
+}
+
+/// The active workspace for a command: the `-w/--workspace` flag wins, else
+/// $MOO_WORKSPACE. The result is borrowed (argv or env) and never freed.
+fn activeWorkspace(flag: ?[]const u8) ?[]const u8 {
+    return paths.resolveWorkspace(flag, posix.getenv("MOO_WORKSPACE"));
+}
+
+/// Resolve the socket dir for a command, turning an invalid workspace name
+/// (from -w or $MOO_WORKSPACE) into a clean usage error rather than letting
+/// error.InvalidSessionName propagate raw to main.
+fn workspaceDir(comptime cmd: []const u8, alloc: std.mem.Allocator, ws_flag: ?[]const u8) ![]u8 {
+    const ws = activeWorkspace(ws_flag);
+    return paths.socketDirFor(alloc, ws) catch |err| switch (err) {
+        error.InvalidSessionName => usageFail(cmd, "invalid workspace name '{s}'", .{ws.?}),
+        else => return err,
+    };
 }
 
 fn printHelpPage(name: []const u8) !void {
@@ -241,6 +259,7 @@ fn cmdNew(alloc: std.mem.Allocator, args: []const [:0]const u8) !void {
     var name: ?[]const u8 = null;
     var detached = false;
     var agent: ?harness.Agent = null;
+    var ws_flag: ?[]const u8 = null;
     var cmd_argv: []const [:0]const u8 = &.{};
 
     var i: usize = 0;
@@ -256,6 +275,10 @@ fn cmdNew(alloc: std.mem.Allocator, args: []const [:0]const u8) !void {
         } else if (flagValue("new", "--agent", args, &i)) |v| {
             agent = harness.Agent.fromId(v) orelse
                 usageFail("new", "unknown agent '{s}' (claude, codex, pi, raw, bash, zsh)", .{v});
+        } else if (flagValue("new", "--workspace", args, &i)) |v| {
+            ws_flag = v;
+        } else if (flagValue("new", "-w", args, &i)) |v| {
+            ws_flag = v;
         } else if (arg.len > 0 and arg[0] == '-') {
             usageFail("new", "unknown flag '{s}'", .{arg});
         } else if (name == null) {
@@ -265,9 +288,13 @@ fn cmdNew(alloc: std.mem.Allocator, args: []const [:0]const u8) !void {
         }
     }
 
-    const dir = try paths.socketDir(alloc);
+    const ws = activeWorkspace(ws_flag);
+    const dir = paths.socketDirFor(alloc, ws) catch |err| switch (err) {
+        error.InvalidSessionName => usageFail("new", "invalid workspace name '{s}'", .{ws.?}),
+        else => return err,
+    };
     defer alloc.free(dir);
-    return createSession(alloc, dir, name, detached, agent, @ptrCast(cmd_argv));
+    return createSession(alloc, dir, name, detached, agent, ws, @ptrCast(cmd_argv));
 }
 
 fn createSession(
@@ -276,6 +303,7 @@ fn createSession(
     name_opt: ?[]const u8,
     detached: bool,
     agent: ?harness.Agent,
+    workspace: ?[]const u8,
     cmd_argv: []const []const u8,
 ) !void {
     var name_buf: [paths.max_name_len]u8 = undefined;
@@ -307,6 +335,16 @@ fn createSession(
         const launch = prepareAgent(alloc, dir, name, ag, cmd_argv);
         argv = launch.argv;
         env_overrides = launch.env;
+    }
+
+    // A workspace session exports MOO_WORKSPACE so processes inside it inherit
+    // the scope; null (a default session) leaves env_overrides untouched, so no
+    // empty value leaks in. Appended after the agent branch to keep its env.
+    if (workspace) |wsname| {
+        const combined = try alloc.alloc([2][]const u8, env_overrides.len + 1);
+        @memcpy(combined[0..env_overrides.len], env_overrides);
+        combined[env_overrides.len] = .{ "MOO_WORKSPACE", wsname };
+        env_overrides = combined;
     }
 
     // Fork the session daemon. The listening socket already exists, so
@@ -407,15 +445,26 @@ fn removeAgentSession(alloc: std.mem.Allocator, dir: []const u8, name: []const u
 
 fn cmdAttach(alloc: std.mem.Allocator, args: []const [:0]const u8) !void {
     var name_arg: ?[]const u8 = null;
-    for (args) |arg| {
+    var ws_flag: ?[]const u8 = null;
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        const arg = args[i];
         if (isHelpFlag(arg)) return printHelpPage("attach");
-        if (arg.len > 0 and arg[0] == '-') usageFail("attach", "unknown flag '{s}'", .{arg});
-        if (name_arg != null) usageFail("attach", "unexpected argument '{s}'", .{arg});
-        name_arg = arg;
+        if (flagValue("attach", "--workspace", args, &i)) |v| {
+            ws_flag = v;
+        } else if (flagValue("attach", "-w", args, &i)) |v| {
+            ws_flag = v;
+        } else if (arg.len > 0 and arg[0] == '-') {
+            usageFail("attach", "unknown flag '{s}'", .{arg});
+        } else if (name_arg != null) {
+            usageFail("attach", "unexpected argument '{s}'", .{arg});
+        } else {
+            name_arg = arg;
+        }
     }
     const want = name_arg orelse usageFail("attach", "a session name is required", .{});
 
-    const dir = try paths.socketDir(alloc);
+    const dir = try workspaceDir("attach", alloc, ws_flag);
     defer alloc.free(dir);
     const name = try resolveSession(alloc, dir, want);
     defer alloc.free(name);
@@ -446,12 +495,21 @@ fn attachLoop(alloc: std.mem.Allocator, dir: []const u8, name: []const u8) !void
 }
 
 fn cmdUi(alloc: std.mem.Allocator, args: []const [:0]const u8) !void {
-    for (args) |arg| {
+    var ws_flag: ?[]const u8 = null;
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        const arg = args[i];
         if (isHelpFlag(arg)) return printHelpPage("ui");
-        usageFail("ui", "unexpected argument '{s}'", .{arg});
+        if (flagValue("ui", "--workspace", args, &i)) |v| {
+            ws_flag = v;
+        } else if (flagValue("ui", "-w", args, &i)) |v| {
+            ws_flag = v;
+        } else {
+            usageFail("ui", "unexpected argument '{s}'", .{arg});
+        }
     }
 
-    const dir = try paths.socketDir(alloc);
+    const dir = try workspaceDir("ui", alloc, ws_flag);
     defer alloc.free(dir);
     ui.run(alloc, dir) catch |err| switch (err) {
         error.NotATty => fail(exit_runtime, "ui requires a terminal", .{}),
@@ -462,16 +520,23 @@ fn cmdUi(alloc: std.mem.Allocator, args: []const [:0]const u8) !void {
 
 fn cmdLs(alloc: std.mem.Allocator, args: []const [:0]const u8) !void {
     var json = false;
-    for (args) |arg| {
+    var ws_flag: ?[]const u8 = null;
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        const arg = args[i];
         if (isHelpFlag(arg)) return printHelpPage("ls");
         if (std.mem.eql(u8, arg, "--json")) {
             json = true;
+        } else if (flagValue("ls", "--workspace", args, &i)) |v| {
+            ws_flag = v;
+        } else if (flagValue("ls", "-w", args, &i)) |v| {
+            ws_flag = v;
         } else {
             usageFail("ls", "unexpected argument '{s}'", .{arg});
         }
     }
 
-    const dir = try paths.socketDir(alloc);
+    const dir = try workspaceDir("ls", alloc, ws_flag);
     defer alloc.free(dir);
     const sessions = try paths.listSessions(alloc, dir);
     defer {
@@ -498,8 +563,8 @@ fn cmdLs(alloc: std.mem.Allocator, args: []const [:0]const u8) !void {
 
     if (json) {
         try out.append(alloc, '[');
-        for (infos.items, 0..) |entry, i| {
-            if (i > 0) try out.append(alloc, ',');
+        for (infos.items, 0..) |entry, idx| {
+            if (idx > 0) try out.append(alloc, ',');
             try out.appendSlice(alloc, "{\"name\":");
             try appendJsonString(alloc, &out, entry.name);
             const tail = try std.fmt.allocPrint(alloc, ",\"attached\":{},\"idle_ms\":{d},\"title\":", .{
@@ -535,6 +600,109 @@ fn cmdLs(alloc: std.mem.Allocator, args: []const [:0]const u8) !void {
     try stdoutWrite(out.items);
 }
 
+fn countSessions(alloc: std.mem.Allocator, dir: []const u8) !usize {
+    const sessions = try paths.listSessions(alloc, dir);
+    defer {
+        for (sessions) |s| alloc.free(s);
+        alloc.free(sessions);
+    }
+    return sessions.len;
+}
+
+fn cmdWs(alloc: std.mem.Allocator, args: []const [:0]const u8) !void {
+    var json = false;
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        const arg = args[i];
+        if (isHelpFlag(arg)) return printHelpPage("ws");
+        if (std.mem.eql(u8, arg, "--json")) {
+            json = true;
+        } else {
+            usageFail("ws", "unexpected argument '{s}'", .{arg});
+        }
+    }
+
+    const base = try paths.socketDir(alloc);
+    defer alloc.free(base);
+
+    const default_count = try countSessions(alloc, base);
+
+    // Collect workspace names first: entry.name borrows the iterator's buffer
+    // and is invalidated by the next next(), so dup before counting (which
+    // reopens and iterates a child directory).
+    var names: std.ArrayList([]u8) = .empty;
+    defer {
+        for (names.items) |n| alloc.free(n);
+        names.deinit(alloc);
+    }
+
+    const ws_root = try std.fs.path.join(alloc, &.{ base, "ws" });
+    defer alloc.free(ws_root);
+    if (std.fs.cwd().openDir(ws_root, .{ .iterate = true })) |dir_const| {
+        var dir = dir_const;
+        defer dir.close();
+        var it = dir.iterate();
+        while (try it.next()) |entry| {
+            if (entry.kind != .directory) continue;
+            paths.validateName(entry.name) catch continue;
+            try names.append(alloc, try alloc.dupe(u8, entry.name));
+        }
+    } else |err| switch (err) {
+        error.FileNotFound => {}, // no named workspaces yet
+        else => return err,
+    }
+
+    std.mem.sort([]u8, names.items, {}, struct {
+        fn lessThan(_: void, a: []u8, b: []u8) bool {
+            return std.mem.lessThan(u8, a, b);
+        }
+    }.lessThan);
+
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(alloc);
+
+    if (json) {
+        try out.append(alloc, '[');
+        try appendWsJson(alloc, &out, "", default_count);
+        for (names.items) |name| {
+            try out.append(alloc, ',');
+            const dir = try std.fs.path.join(alloc, &.{ ws_root, name });
+            defer alloc.free(dir);
+            try appendWsJson(alloc, &out, name, try countSessions(alloc, dir));
+        }
+        try out.appendSlice(alloc, "]\n");
+        return stdoutWrite(out.items);
+    }
+
+    var name_width: usize = "(default)".len;
+    for (names.items) |name| name_width = @max(name_width, name.len);
+
+    try appendPadded(alloc, &out, "WORKSPACE", name_width);
+    try out.appendSlice(alloc, "  SESSIONS\n");
+    try appendWsRow(alloc, &out, "(default)", default_count, name_width);
+    for (names.items) |name| {
+        const dir = try std.fs.path.join(alloc, &.{ ws_root, name });
+        defer alloc.free(dir);
+        try appendWsRow(alloc, &out, name, try countSessions(alloc, dir), name_width);
+    }
+    try stdoutWrite(out.items);
+}
+
+fn appendWsJson(alloc: std.mem.Allocator, out: *std.ArrayList(u8), name: []const u8, count: usize) !void {
+    try out.appendSlice(alloc, "{\"workspace\":");
+    try appendJsonString(alloc, out, name);
+    const tail = try std.fmt.allocPrint(alloc, ",\"sessions\":{d}}}", .{count});
+    defer alloc.free(tail);
+    try out.appendSlice(alloc, tail);
+}
+
+fn appendWsRow(alloc: std.mem.Allocator, out: *std.ArrayList(u8), name: []const u8, count: usize, width: usize) !void {
+    try appendPadded(alloc, out, name, width);
+    const line = try std.fmt.allocPrint(alloc, "  {d}\n", .{count});
+    defer alloc.free(line);
+    try out.appendSlice(alloc, line);
+}
+
 fn cutTab(rest: *[]const u8) ?[]const u8 {
     const idx = std.mem.indexOfScalar(u8, rest.*, '\t') orelse return null;
     const field = rest.*[0..idx];
@@ -548,6 +716,7 @@ fn cmdSend(alloc: std.mem.Allocator, args: []const [:0]const u8) !void {
     var keys_arg: ?[]const u8 = null;
     var enter = false;
     var stdin = false;
+    var ws_flag: ?[]const u8 = null;
 
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
@@ -561,6 +730,10 @@ fn cmdSend(alloc: std.mem.Allocator, args: []const [:0]const u8) !void {
             text = v;
         } else if (flagValue("send", "--key", args, &i)) |v| {
             keys_arg = v;
+        } else if (flagValue("send", "--workspace", args, &i)) |v| {
+            ws_flag = v;
+        } else if (flagValue("send", "-w", args, &i)) |v| {
+            ws_flag = v;
         } else if (arg.len > 0 and arg[0] == '-') {
             usageFail("send", "unknown flag '{s}'", .{arg});
         } else if (name_arg == null) {
@@ -579,7 +752,7 @@ fn cmdSend(alloc: std.mem.Allocator, args: []const [:0]const u8) !void {
     const want = name_arg orelse usageFail("send", "a session name is required", .{});
 
     // Resolve the session before potentially blocking on stdin.
-    const dir = try paths.socketDir(alloc);
+    const dir = try workspaceDir("send", alloc, ws_flag);
     defer alloc.free(dir);
     const name = try resolveSession(alloc, dir, want);
     defer alloc.free(name);
@@ -697,12 +870,19 @@ fn cmdPeek(alloc: std.mem.Allocator, args: []const [:0]const u8) !void {
     var scrollback = false;
     var json = false;
     var name_arg: ?[]const u8 = null;
-    for (args) |arg| {
+    var ws_flag: ?[]const u8 = null;
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        const arg = args[i];
         if (isHelpFlag(arg)) return printHelpPage("peek");
         if (std.mem.eql(u8, arg, "--scrollback")) {
             scrollback = true;
         } else if (std.mem.eql(u8, arg, "--json")) {
             json = true;
+        } else if (flagValue("peek", "--workspace", args, &i)) |v| {
+            ws_flag = v;
+        } else if (flagValue("peek", "-w", args, &i)) |v| {
+            ws_flag = v;
         } else if (arg.len > 0 and arg[0] == '-') {
             usageFail("peek", "unknown flag '{s}'", .{arg});
         } else if (name_arg == null) {
@@ -713,7 +893,7 @@ fn cmdPeek(alloc: std.mem.Allocator, args: []const [:0]const u8) !void {
     }
     const want = name_arg orelse usageFail("peek", "a session name is required", .{});
 
-    const dir = try paths.socketDir(alloc);
+    const dir = try workspaceDir("peek", alloc, ws_flag);
     defer alloc.free(dir);
     const name = try resolveSession(alloc, dir, want);
     defer alloc.free(name);
@@ -765,6 +945,7 @@ fn cmdRead(alloc: std.mem.Allocator, args: []const [:0]const u8) !void {
     var agent_kind: ?[]const u8 = null;
     var file: ?[]const u8 = null;
     var positional: ?[]const u8 = null;
+    var ws_flag: ?[]const u8 = null;
 
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
@@ -778,6 +959,10 @@ fn cmdRead(alloc: std.mem.Allocator, args: []const [:0]const u8) !void {
             agent_kind = v;
         } else if (flagValue("read", "--file", args, &i)) |v| {
             file = v;
+        } else if (flagValue("read", "--workspace", args, &i)) |v| {
+            ws_flag = v;
+        } else if (flagValue("read", "-w", args, &i)) |v| {
+            ws_flag = v;
         } else if (arg.len > 0 and arg[0] == '-') {
             usageFail("read", "unknown flag '{s}'", .{arg});
         } else if (positional == null) {
@@ -809,7 +994,7 @@ fn cmdRead(alloc: std.mem.Allocator, args: []const [:0]const u8) !void {
 
     // Session mode: resolve a live session, read its sidecar, locate transcript.
     const want = positional orelse usageFail("read", "a session name is required", .{});
-    const dir = try paths.socketDir(alloc);
+    const dir = try workspaceDir("read", alloc, ws_flag);
     defer alloc.free(dir);
     const name = try resolveSession(alloc, dir, want);
     defer alloc.free(name);
@@ -901,6 +1086,7 @@ fn cmdWait(alloc: std.mem.Allocator, args: []const [:0]const u8) !void {
     var text: ?[]const u8 = null;
     var idle = false;
     var timeout_str: []const u8 = "30s";
+    var ws_flag: ?[]const u8 = null;
 
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
@@ -912,6 +1098,10 @@ fn cmdWait(alloc: std.mem.Allocator, args: []const [:0]const u8) !void {
             text = v;
         } else if (flagValue("wait", "--timeout", args, &i)) |v| {
             timeout_str = v;
+        } else if (flagValue("wait", "--workspace", args, &i)) |v| {
+            ws_flag = v;
+        } else if (flagValue("wait", "-w", args, &i)) |v| {
+            ws_flag = v;
         } else if (arg.len > 0 and arg[0] == '-') {
             usageFail("wait", "unknown flag '{s}'", .{arg});
         } else if (name_arg == null) {
@@ -928,7 +1118,7 @@ fn cmdWait(alloc: std.mem.Allocator, args: []const [:0]const u8) !void {
     const timeout_ms = parseDurationMs(timeout_str) orelse
         usageFail("wait", "bad duration '{s}' (use 500ms, 2s, 1m, 4h, 1d)", .{timeout_str});
 
-    const dir = try paths.socketDir(alloc);
+    const dir = try workspaceDir("wait", alloc, ws_flag);
     defer alloc.free(dir);
     const name = try resolveSession(alloc, dir, want);
     defer alloc.free(name);
@@ -958,10 +1148,17 @@ fn cmdWait(alloc: std.mem.Allocator, args: []const [:0]const u8) !void {
 fn cmdKill(alloc: std.mem.Allocator, args: []const [:0]const u8) !void {
     var all = false;
     var name_arg: ?[]const u8 = null;
-    for (args) |arg| {
+    var ws_flag: ?[]const u8 = null;
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        const arg = args[i];
         if (isHelpFlag(arg)) return printHelpPage("kill");
         if (std.mem.eql(u8, arg, "--all")) {
             all = true;
+        } else if (flagValue("kill", "--workspace", args, &i)) |v| {
+            ws_flag = v;
+        } else if (flagValue("kill", "-w", args, &i)) |v| {
+            ws_flag = v;
         } else if (arg.len > 0 and arg[0] == '-') {
             usageFail("kill", "unknown flag '{s}'", .{arg});
         } else if (name_arg == null) {
@@ -974,7 +1171,7 @@ fn cmdKill(alloc: std.mem.Allocator, args: []const [:0]const u8) !void {
         usageFail("kill", "--all cannot be combined with a session name", .{});
     }
 
-    const dir = try paths.socketDir(alloc);
+    const dir = try workspaceDir("kill", alloc, ws_flag);
     defer alloc.free(dir);
 
     if (all) {
@@ -1010,9 +1207,16 @@ fn cmdKill(alloc: std.mem.Allocator, args: []const [:0]const u8) !void {
 fn cmdRename(alloc: std.mem.Allocator, args: []const [:0]const u8) !void {
     var old_arg: ?[]const u8 = null;
     var new_arg: ?[]const u8 = null;
-    for (args) |arg| {
+    var ws_flag: ?[]const u8 = null;
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        const arg = args[i];
         if (isHelpFlag(arg)) return printHelpPage("rename");
-        if (arg.len > 0 and arg[0] == '-') {
+        if (flagValue("rename", "--workspace", args, &i)) |v| {
+            ws_flag = v;
+        } else if (flagValue("rename", "-w", args, &i)) |v| {
+            ws_flag = v;
+        } else if (arg.len > 0 and arg[0] == '-') {
             usageFail("rename", "unknown flag '{s}'", .{arg});
         } else if (old_arg == null) {
             old_arg = arg;
@@ -1027,7 +1231,7 @@ fn cmdRename(alloc: std.mem.Allocator, args: []const [:0]const u8) !void {
     paths.validateName(new_name) catch
         usageFail("rename", "invalid session name '{s}'", .{new_name});
 
-    const dir = try paths.socketDir(alloc);
+    const dir = try workspaceDir("rename", alloc, ws_flag);
     defer alloc.free(dir);
     const name = try resolveSession(alloc, dir, want);
     defer alloc.free(name);

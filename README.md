@@ -153,6 +153,41 @@ turn-completion signal, poll the transcript state instead, e.g. until
 Approvals and permission prompts that never reach disk read as `running` rather
 than a dedicated waiting state. See `moo help agents` for the full page.
 
+### Workspaces
+
+A *workspace* is a named, isolated group of sessions. By default every
+command shares one namespace; `-w/--workspace <name>` (or the
+`MOO_WORKSPACE` environment variable) scopes a command to a workspace so it
+sees only that workspace's sessions. Unrelated projects no longer collide:
+the same session name can exist independently in two workspaces.
+
+```sh
+moo new api -w proj -d -- bash   # a session in the "proj" workspace
+moo ls -w proj                   # list only "proj" sessions
+moo new api -d -- bash           # a separate "api" in the default workspace
+moo ws                           # all workspaces, with live session counts
+moo kill --all -w proj           # end only "proj"; the default is untouched
+```
+
+Every session command takes `-w/--workspace` (`new`, `attach`, `ui`, `ls`,
+`send`, `peek`, `read`, `wait`, `kill`, `rename`); both `-w proj` and
+`--workspace=proj` work. The flag wins over `MOO_WORKSPACE`, which wins over
+the default (unnamed) workspace.
+
+- **Isolation by directory**: the socket directory is the default
+  workspace, and a named workspace is just a `ws/<name>/` subdirectory of
+  it (mode `0700`) with its own sockets. Because each command resolves a
+  single directory, `ls`, `new`, and `kill --all` physically cannot see or
+  touch another workspace's sessions.
+- **Confining an orchestrator**: the daemon exports `MOO_WORKSPACE=<name>`
+  into each workspace session's environment. A process running *inside* a
+  workspace session inherits it, so every `moo` command that process runs
+  is automatically confined to the same workspace. A coding agent driving
+  moo from inside `proj` therefore cannot enumerate or kill sessions in
+  other projects. A default (unnamed) session leaves `MOO_WORKSPACE` unset.
+
+See `moo help workspaces` for the full page.
+
 ## Why moo?
 
 GNU screen works the same way moo does, architecturally: it parses all

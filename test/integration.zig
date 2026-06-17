@@ -60,7 +60,7 @@ const Harness = struct {
     }
 
     fn run(self: *Harness, argv: []const []const u8) !std.process.Child.RunResult {
-        return self.runIn(null, argv);
+        return self.runInEnv(null, argv, null);
     }
 
     /// Run a CLI command with an explicit working directory; cwd null
@@ -69,6 +69,27 @@ const Harness = struct {
         self: *Harness,
         cwd: ?[]const u8,
         argv: []const []const u8,
+    ) !std.process.Child.RunResult {
+        return self.runInEnv(cwd, argv, null);
+    }
+
+    /// Run a CLI command with MOO_WORKSPACE exported to `ws_env`, the way a
+    /// shell inside a workspace session would for nested commands. This
+    /// re-injects the variable that runInEnv strips for hermeticity, so the
+    /// env-driven workspace path can be exercised without a -w flag.
+    fn runWithWorkspaceEnv(
+        self: *Harness,
+        argv: []const []const u8,
+        ws_env: []const u8,
+    ) !std.process.Child.RunResult {
+        return self.runInEnv(null, argv, ws_env);
+    }
+
+    fn runInEnv(
+        self: *Harness,
+        cwd: ?[]const u8,
+        argv: []const []const u8,
+        ws_env: ?[]const u8,
     ) !std.process.Child.RunResult {
         // exe_path is relative to the build root; resolve it so a
         // custom cwd does not break spawning.
@@ -89,6 +110,12 @@ const Harness = struct {
         env.remove("MOO");
         env.remove("MOO_FOREGROUND");
         env.remove("MOO_LOG");
+        // A developer running the suite from inside a workspace session would
+        // otherwise leak MOO_WORKSPACE into the child and shift every command's
+        // socket dir; the -w flag is exercised explicitly instead. A test that
+        // wants the env path re-puts it after this remove via ws_env.
+        env.remove("MOO_WORKSPACE");
+        if (ws_env) |ws| try env.put("MOO_WORKSPACE", ws);
         try env.put("MOO_DIR", self.dir);
 
         return std.process.Child.run(.{
@@ -1389,6 +1416,338 @@ test "rename: moves a session to a new name" {
     try h.runExit(&.{ "rename", "nosuchzz", "x" }, 3);
     try h.runExit(&.{"rename"}, 2);
     try h.runExit(&.{ "rename", "after" }, 2);
+}
+
+// -- workspaces ---------------------------------------------------------------
+
+/// True when `moo ls --json` (with any extra args, e.g. `-w proj`) lists a
+/// session of the given name. Caller-supplied ls_args precede `--json`.
+fn lsHasSession(h: *Harness, ls_args: []const []const u8, name: []const u8) !bool {
+    var argv: std.ArrayList([]const u8) = .empty;
+    defer argv.deinit(h.alloc);
+    try argv.append(h.alloc, "ls");
+    try argv.appendSlice(h.alloc, ls_args);
+    try argv.append(h.alloc, "--json");
+    const result = try h.run(argv.items);
+    defer h.alloc.free(result.stdout);
+    defer h.alloc.free(result.stderr);
+    if (result.term != .Exited or result.term.Exited != 0) return error.LsFailed;
+    var parsed = try std.json.parseFromSlice(std.json.Value, h.alloc, result.stdout, .{});
+    defer parsed.deinit();
+    for (parsed.value.array.items) |entry| {
+        if (std.mem.eql(u8, entry.object.get("name").?.string, name)) return true;
+    }
+    return false;
+}
+
+/// Start a detached session inside a workspace and wait for it to be live.
+/// Mirrors Harness.startDetached but threads `-w <workspace>` through every
+/// command, since the session is only visible within that workspace's dir.
+fn startDetachedWs(
+    h: *Harness,
+    workspace: []const u8,
+    session: []const u8,
+    cmd: []const []const u8,
+) !void {
+    var argv: std.ArrayList([]const u8) = .empty;
+    defer argv.deinit(h.alloc);
+    try argv.appendSlice(h.alloc, &.{ "new", "-w", workspace, session, "-d", "--" });
+    try argv.appendSlice(h.alloc, cmd);
+    const result = try h.run(argv.items);
+    defer h.alloc.free(result.stdout);
+    defer h.alloc.free(result.stderr);
+    if (result.term != .Exited or result.term.Exited != 0) {
+        std.debug.print("new -w failed: {s}\n", .{result.stderr});
+        return error.StartFailed;
+    }
+    try std.testing.expect(std.mem.indexOf(u8, result.stdout, session) != null);
+
+    var deadline = Deadline.init(default_timeout_ms);
+    while (true) {
+        const peek = try h.run(&.{ "peek", "-w", workspace, session });
+        defer h.alloc.free(peek.stdout);
+        defer h.alloc.free(peek.stderr);
+        if (peek.term == .Exited and peek.term.Exited == 0) return;
+        try deadline.tick("workspace session did not come up");
+    }
+}
+
+test "workspace -w isolates a session into its own directory" {
+    const alloc = std.testing.allocator;
+    var h = try Harness.init(alloc);
+    defer h.deinit();
+
+    // C1: a -w session is created and visible within that workspace.
+    try startDetachedWs(&h, "proj", "wsone", &.{"cat"});
+    try std.testing.expect(try lsHasSession(&h, &.{ "-w", "proj" }, "wsone"));
+
+    // C2 (isolation): the default-workspace listing does not see it.
+    try std.testing.expect(!try lsHasSession(&h, &.{}, "wsone"));
+}
+
+test "workspace kill --all only banishes its own sessions" {
+    const alloc = std.testing.allocator;
+    var h = try Harness.init(alloc);
+    defer h.deinit();
+
+    // C4: one default-workspace session and one proj session.
+    try h.startDetached("base", &.{"cat"});
+    try startDetachedWs(&h, "proj", "inproj", &.{"cat"});
+    try std.testing.expect(try lsHasSession(&h, &.{}, "base"));
+    try std.testing.expect(try lsHasSession(&h, &.{ "-w", "proj" }, "inproj"));
+
+    // kill --all scoped to proj removes only the proj session.
+    try h.runOk(&.{ "kill", "-w", "proj", "--all" });
+
+    var deadline = Deadline.init(default_timeout_ms);
+    while (true) {
+        if (!try lsHasSession(&h, &.{ "-w", "proj" }, "inproj")) break;
+        try deadline.tick("proj session survived workspace kill --all");
+    }
+    // The default-workspace session is untouched.
+    try std.testing.expect(try lsHasSession(&h, &.{}, "base"));
+}
+
+test "workspace prefix resolution is scoped to the workspace" {
+    const alloc = std.testing.allocator;
+    var h = try Harness.init(alloc);
+    defer h.deinit();
+
+    // C5: a session named "worker" exists only in proj.
+    try startDetachedWs(&h, "proj", "worker", &.{"cat"});
+
+    // A unique prefix resolves within the workspace (exit 0).
+    try h.runExit(&.{ "peek", "-w", "proj", "wor" }, 0);
+    // The same prefix against the default workspace finds nothing (exit 3).
+    try h.runExit(&.{ "peek", "wor" }, 3);
+}
+
+/// Poll a workspace-scoped session's screen until `needle` appears. Mirrors
+/// Harness.waitPeekContains but threads `-w <workspace>` so the peek resolves
+/// inside that workspace's directory. Returns the matching peek; caller frees.
+fn waitPeekContainsWs(
+    h: *Harness,
+    workspace: []const u8,
+    session: []const u8,
+    needle: []const u8,
+) ![]u8 {
+    var deadline = Deadline.init(default_timeout_ms);
+    var last: ?[]u8 = null;
+    errdefer if (last) |l| h.alloc.free(l);
+    while (true) {
+        const result = try h.run(&.{ "peek", "-w", workspace, session });
+        h.alloc.free(result.stderr);
+        if (last) |l| h.alloc.free(l);
+        last = null;
+        if (result.term == .Exited and result.term.Exited == 0) {
+            last = result.stdout;
+            if (std.mem.indexOf(u8, result.stdout, needle) != null) return result.stdout;
+        } else {
+            h.alloc.free(result.stdout);
+        }
+        deadline.tick("workspace peek never contained needle") catch |err| {
+            std.debug.print("--- last peek ---\n{s}\n---\n", .{last orelse "<none>"});
+            return err;
+        };
+    }
+}
+
+// A session command that reports MOO_WORKSPACE at launch, then keeps the
+// session alive. `exec cat` replaces the shell with a process that blocks on
+// stdin forever, so the session stays up for later peeks without the printf
+// scrolling away.
+const ws_probe = "printf \"WS=[%s]\\n\" \"$MOO_WORKSPACE\"; exec cat";
+
+test "workspace session inherits MOO_WORKSPACE in its env" {
+    const alloc = std.testing.allocator;
+    var h = try Harness.init(alloc);
+    defer h.deinit();
+
+    // C1: the daemon exports MOO_WORKSPACE=<name> into a -w session's
+    // process env, so the probe prints the workspace name.
+    try startDetachedWs(&h, "proj", "envset", &.{ "sh", "-c", ws_probe });
+    const content = try waitPeekContainsWs(&h, "proj", "envset", "WS=[proj]");
+    defer alloc.free(content);
+}
+
+test "default session has no MOO_WORKSPACE in its env" {
+    const alloc = std.testing.allocator;
+    var h = try Harness.init(alloc);
+    defer h.deinit();
+
+    // C2: a session created without -w must not inherit MOO_WORKSPACE; the
+    // probe sees an empty value. This fails if an implementer wrongly exports
+    // an empty (or any) MOO_WORKSPACE for default-workspace sessions.
+    try h.startDetached("envunset", &.{ "sh", "-c", ws_probe });
+    const content = try h.waitPeekContains("envunset", "WS=[]");
+    defer alloc.free(content);
+}
+
+test "nested moo inside a workspace session is confined to that workspace" {
+    const alloc = std.testing.allocator;
+    var h = try Harness.init(alloc);
+    defer h.deinit();
+
+    // C3 (end-to-end confinement): a process running inside a workspace
+    // session inherits MOO_DIR + MOO_WORKSPACE, so a nested `moo ls` it runs
+    // resolves to that workspace and never sees default-workspace sessions.
+    try h.startDetached("base", &.{"cat"});
+    try startDetachedWs(&h, "proj", "shell", &.{"sh"});
+    // Confirm the proj shell is live before driving it.
+    const ready = try waitPeekContainsWs(&h, "proj", "shell", "$");
+    alloc.free(ready);
+
+    // Drive the nested moo with the same absolute binary the harness spawns,
+    // since a workspace session's PATH need not contain it.
+    var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const exe_abs = try std.fs.cwd().realpath(exe_path, &exe_buf);
+    const cmd = try std.fmt.allocPrint(alloc, "{s} ls", .{exe_abs});
+    defer alloc.free(cmd);
+    try h.runOk(&.{ "send", "-w", "proj", "shell", "--text", cmd, "--enter" });
+
+    // The nested listing shows the proj session and not the default one.
+    // Assert on the distinctive names rather than exact layout, so terminal
+    // wrapping in the captured screen does not make the check brittle.
+    const listing = try waitPeekContainsWs(&h, "proj", "shell", "shell");
+    defer alloc.free(listing);
+    try std.testing.expect(std.mem.indexOf(u8, listing, "base") == null);
+}
+
+// -- invalid workspace names --------------------------------------------------
+
+/// Assert a finished command rejected an invalid workspace name cleanly: the
+/// usage exit code (2), the stable "invalid workspace name" phrase on stderr,
+/// and none of the raw propagated error name or stack trace that an unhandled
+/// error.InvalidSessionName would leak. Frees the result.
+fn expectCleanWsError(h: *Harness, result: std.process.Child.RunResult) !void {
+    defer h.alloc.free(result.stdout);
+    defer h.alloc.free(result.stderr);
+    if (result.term != .Exited or result.term.Exited != 2) {
+        std.debug.print("wanted exit 2, got {any}: {s}\n", .{ result.term, result.stderr });
+        return error.WrongExit;
+    }
+    try std.testing.expect(std.mem.indexOf(u8, result.stderr, "invalid workspace name") != null);
+    // The raw error name and a Zig stack trace must not reach the user.
+    try std.testing.expect(std.mem.indexOf(u8, result.stderr, "InvalidSessionName") == null);
+    try std.testing.expect(std.mem.indexOf(u8, result.stderr, "paths.zig") == null);
+}
+
+test "invalid workspace name from -w is a clean usage error" {
+    var h = try Harness.init(std.testing.allocator);
+    defer h.deinit();
+
+    // A traversal name, a leading-dash name (flagValue consumes "-bad" as the
+    // -w value), and an empty value all fail validateName and must surface as
+    // exit-2 usage errors, not a raw error.InvalidSessionName at exit 1.
+    for ([_][]const u8{ "../x", "-bad", "" }) |bad| {
+        try expectCleanWsError(&h, try h.run(&.{ "ls", "-w", bad }));
+    }
+}
+
+test "invalid MOO_WORKSPACE env value is a clean usage error" {
+    var h = try Harness.init(std.testing.allocator);
+    defer h.deinit();
+
+    // The env path (no -w flag) must be just as clean as the flag path: a bad
+    // MOO_WORKSPACE in the environment yields the exit-2 usage message.
+    try expectCleanWsError(&h, try h.runWithWorkspaceEnv(&.{"ls"}, "../x"));
+}
+
+test "invalid workspace name is clean across commands and creates nothing" {
+    const alloc = std.testing.allocator;
+    var h = try Harness.init(alloc);
+    defer h.deinit();
+
+    // A non-ls command proves the clean error is consistent, not ls-specific.
+    try expectCleanWsError(&h, try h.run(&.{ "new", "-w", "../x", "-d", "--", "cat" }));
+
+    // The rejected traversal name must not have created a ws/ directory or
+    // escaped the harness dir: validation happens before any mkdir.
+    const ws_dir = try std.fs.path.join(alloc, &.{ h.dir, "ws" });
+    defer alloc.free(ws_dir);
+    try std.testing.expectError(error.FileNotFound, std.fs.cwd().access(ws_dir, .{}));
+}
+
+// -- moo ws -------------------------------------------------------------------
+
+/// Look up a workspace's session count in `moo ws --json`. The default
+/// workspace is reported under the empty string, which a real workspace name
+/// can never be (validateName rejects ""), so "" unambiguously denotes it.
+/// Returns null when no entry names the workspace. Mirrors lsHasSession's
+/// order-independent parse: entries are matched by name, not array position.
+fn wsCount(h: *Harness, workspace: []const u8) !?i64 {
+    const result = try h.run(&.{ "ws", "--json" });
+    defer h.alloc.free(result.stdout);
+    defer h.alloc.free(result.stderr);
+    if (result.term != .Exited or result.term.Exited != 0) return error.WsFailed;
+    var parsed = try std.json.parseFromSlice(std.json.Value, h.alloc, result.stdout, .{});
+    defer parsed.deinit();
+    for (parsed.value.array.items) |entry| {
+        if (std.mem.eql(u8, entry.object.get("workspace").?.string, workspace)) {
+            return entry.object.get("sessions").?.integer;
+        }
+    }
+    return null;
+}
+
+test "ws --json reports the default and every workspace with a session count" {
+    const alloc = std.testing.allocator;
+    var h = try Harness.init(alloc);
+    defer h.deinit();
+
+    // C1: sessions spread across the default workspace and two named ones.
+    // cat stays alive so each session is counted as a live socket.
+    try h.startDetached("base", &.{"cat"});
+    try startDetachedWs(&h, "alpha", "a1", &.{"cat"});
+    try startDetachedWs(&h, "alpha", "a2", &.{"cat"});
+    try startDetachedWs(&h, "beta", "b1", &.{"cat"});
+
+    try std.testing.expectEqual(@as(?i64, 1), try wsCount(&h, ""));
+    try std.testing.expectEqual(@as(?i64, 2), try wsCount(&h, "alpha"));
+    try std.testing.expectEqual(@as(?i64, 1), try wsCount(&h, "beta"));
+}
+
+test "ws human output lists workspace names and counts" {
+    const alloc = std.testing.allocator;
+    var h = try Harness.init(alloc);
+    defer h.deinit();
+
+    // C2: the plain (non-JSON) listing exits 0 and surfaces the workspace
+    // names alongside their counts. The exact table layout is left loose so
+    // the assertion does not over-fit formatting the implementer chooses.
+    try startDetachedWs(&h, "alpha", "a1", &.{"cat"});
+    try startDetachedWs(&h, "alpha", "a2", &.{"cat"});
+
+    const result = try h.run(&.{"ws"});
+    defer alloc.free(result.stdout);
+    defer alloc.free(result.stderr);
+    try std.testing.expect(result.term == .Exited and result.term.Exited == 0);
+    try std.testing.expect(result.stdout.len > 0);
+    try std.testing.expect(std.mem.indexOf(u8, result.stdout, "alpha") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result.stdout, "2") != null);
+}
+
+test "ws --json with no workspaces returns just the default entry" {
+    const alloc = std.testing.allocator;
+    var h = try Harness.init(alloc);
+    defer h.deinit();
+
+    // C3: a fresh harness has no ws/ directory at all. ws must still exit 0
+    // and report the default workspace (here with one live session) without
+    // erroring on the absent ws/ subdir.
+    try h.startDetached("only", &.{"cat"});
+
+    const result = try h.run(&.{ "ws", "--json" });
+    defer alloc.free(result.stdout);
+    defer alloc.free(result.stderr);
+    try std.testing.expect(result.term == .Exited and result.term.Exited == 0);
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, alloc, result.stdout, .{});
+    defer parsed.deinit();
+    try std.testing.expectEqual(@as(usize, 1), parsed.value.array.items.len);
+    const entry = parsed.value.array.items[0].object;
+    try std.testing.expectEqualStrings("", entry.get("workspace").?.string);
+    try std.testing.expectEqual(@as(i64, 1), entry.get("sessions").?.integer);
 }
 
 // -- moo ui -------------------------------------------------------------------

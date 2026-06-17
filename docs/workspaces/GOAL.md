@@ -42,12 +42,13 @@ convention) is the whole point; the rejected soft-label alternative is in `PLAN.
 |----|---------|--------|
 | W0   | `just check` gate recipes + proven-green baseline | ✅ done |
 | W0.1 | Hermetic integration harness (clears leaked `MOO*`) | ✅ done |
-| W1   | `paths.socketDir` resolves `<base>/ws/<name>`; validates name | pending |
-| W2   | `-w/--workspace` flag + `MOO_WORKSPACE` resolution across commands | pending (needs W1) |
-| W3   | Daemon exports `MOO_WORKSPACE` into session env (via `env_overrides`) | pending (needs W2) |
-| W4   | `moo ws` command (list workspaces + counts, `--json`) | pending (needs W2) |
-| W5   | Help + README docs for `-w`, `MOO_WORKSPACE`, `moo ws` | pending (needs W3, W4) |
-| W6   | Phase 2: UI aggregate workspace view (sections + filter toggle) | pending (needs W2; gated by the open decision below) |
+| W1   | `paths.socketDirFor` resolves `<base>/ws/<name>`; validates name | ✅ done |
+| W2   | `-w/--workspace` flag + `MOO_WORKSPACE` resolution across commands | ✅ done |
+| W3   | Daemon exports `MOO_WORKSPACE` into session env (via `env_overrides`) | ✅ done |
+| W4   | `moo ws` command (list workspaces + counts, `--json`) | ✅ done |
+| W5   | Help + README docs for `-w`, `MOO_WORKSPACE`, `moo ws` | ✅ done |
+| W7   | Clean `moo: invalid workspace name` usage error (added after W2 review) | ✅ done |
+| W6   | Phase 2: UI aggregate workspace view (sections + filter toggle) | ⏸️ deferred (user decision; design settled scoped+toggle) |
 
 ## Product acceptance (the behaviours that prove success)
 
@@ -70,11 +71,12 @@ convention) is the whole point; the rejected soft-label alternative is in `PLAN.
 - W6 either delivered or explicitly deferred pending the decision below.
 - Nothing committed/pushed until the user asks (see HANDOFF.md commit policy).
 
-## Open decision (gates W6 only)
+## Open decision (gates W6 only) — RESOLVED 2026-06-17
 
-Default for `moo ui` with no `-w`: **scoped to the active workspace** (recommended)
-vs **show-all-grouped**. Proceed with scoped-by-default + a toggle unless the user
-says otherwise. W1–W5 do not depend on this.
+Default for `moo ui` with no `-w`: **scoped to the active workspace** + a toggle to a
+grouped all-workspaces view. Decided by the user. W6 itself was then **deferred** to a
+focused follow-up (the grouped view is a larger UI refactor than the plan implied —
+per-entry workspace dirs + sidebar row-index/mouse math); W1–W5 + W7 shipped without it.
 
 ## Non-goals / constraints
 

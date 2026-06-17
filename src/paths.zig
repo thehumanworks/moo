@@ -67,6 +67,49 @@ fn socketDirFrom(
     return dir;
 }
 
+/// Resolve the active workspace from the `-w/--workspace` flag and the
+/// `MOO_WORKSPACE` environment value. The flag wins; otherwise the env value is
+/// used unless it is empty, which (like an exported-but-blank variable) means no
+/// workspace. Validation of the resulting name is left to socketDirFor.
+pub fn resolveWorkspace(flag: ?[]const u8, env: ?[]const u8) ?[]const u8 {
+    if (flag) |f| return f;
+    if (env) |e| {
+        if (e.len == 0) return null;
+        return e;
+    }
+    return null;
+}
+
+/// Like socketDir, but namespaces sessions under "<base>/ws/<workspace>" when a
+/// workspace is active. With no workspace the result is the plain base dir.
+pub fn socketDirFor(alloc: std.mem.Allocator, workspace: ?[]const u8) ![]u8 {
+    return socketDirFromFor(
+        alloc,
+        std.posix.getenv("MOO_DIR"),
+        std.posix.getenv("XDG_RUNTIME_DIR"),
+        workspace,
+    );
+}
+
+fn socketDirFromFor(
+    alloc: std.mem.Allocator,
+    boo_dir: ?[]const u8,
+    runtime_dir: ?[]const u8,
+    workspace: ?[]const u8,
+) ![]u8 {
+    const ws = workspace orelse return socketDirFrom(alloc, boo_dir, runtime_dir);
+    // Validate before resolving so a bad name creates nothing, not even ws/.
+    try validateName(ws);
+
+    const base = try socketDirFrom(alloc, boo_dir, runtime_dir);
+    defer alloc.free(base);
+
+    const dir = try std.fs.path.join(alloc, &.{ base, "ws", ws });
+    errdefer alloc.free(dir);
+    try ensureDir(dir);
+    return dir;
+}
+
 fn ensureDir(dir: []const u8) !void {
     std.fs.cwd().makePath(dir) catch |err| switch (err) {
         error.PathAlreadyExists => {},
@@ -308,4 +351,160 @@ test "socketDirFrom falls back when the runtime dir is unusable" {
         defer alloc.free(dir);
         try std.testing.expectEqualStrings(fallback, dir);
     }
+}
+
+// Mode bits of an existing directory, masked to the permission bits.
+fn dirMode(path: []const u8) !u32 {
+    const st = try std.posix.fstatat(std.posix.AT.FDCWD, path, 0);
+    return @as(u32, @intCast(st.mode)) & 0o777;
+}
+
+test "socketDirFromFor without a workspace is byte-for-byte the no-workspace path" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const base = try tmp.dir.realpathAlloc(alloc, ".");
+    defer alloc.free(base);
+
+    const moo_dir = try std.fs.path.join(alloc, &.{ base, "override", "moo" });
+    defer alloc.free(moo_dir);
+
+    const want = try socketDirFrom(alloc, moo_dir, null);
+    defer alloc.free(want);
+
+    const got = try socketDirFromFor(alloc, moo_dir, null, null);
+    defer alloc.free(got);
+
+    try std.testing.expectEqualStrings(want, got);
+    // No ws/ suffix and no ws/ directory was created under the base.
+    try std.testing.expect(std.mem.indexOf(u8, got, "/ws/") == null);
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access("override/moo/ws", .{}));
+}
+
+test "socketDirFromFor with a workspace resolves <base>/ws/<name> at mode 0700" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const base = try tmp.dir.realpathAlloc(alloc, ".");
+    defer alloc.free(base);
+
+    const moo_dir = try std.fs.path.join(alloc, &.{ base, "moo" });
+    defer alloc.free(moo_dir);
+
+    const dir = try socketDirFromFor(alloc, moo_dir, null, "proj");
+    defer alloc.free(dir);
+
+    const want = try std.fs.path.join(alloc, &.{ moo_dir, "ws", "proj" });
+    defer alloc.free(want);
+    try std.testing.expectEqualStrings(want, dir);
+
+    // The directory exists and is private to the user.
+    var d = try std.fs.cwd().openDir(dir, .{});
+    d.close();
+    try std.testing.expectEqual(@as(u32, 0o700), try dirMode(dir));
+}
+
+test "socketDirFromFor rejects invalid workspace names and creates nothing" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const base = try tmp.dir.realpathAlloc(alloc, ".");
+    defer alloc.free(base);
+
+    const moo_dir = try std.fs.path.join(alloc, &.{ base, "moo" });
+    defer alloc.free(moo_dir);
+
+    for ([_][]const u8{ "../x", "", "-flag" }) |bad| {
+        try std.testing.expectError(
+            error.InvalidSessionName,
+            socketDirFromFor(alloc, moo_dir, null, bad),
+        );
+    }
+
+    // No ws/<name> directory was created for any rejected name. The ws/
+    // parent itself must not be left behind either.
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access("moo/ws", .{}));
+}
+
+test "listSessions ignores the ws/ subdirectory" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const base = try tmp.dir.realpathAlloc(alloc, ".");
+    defer alloc.free(base);
+
+    // A normal session socket in the base, plus a workspace holding its own
+    // session. listSessions(base) must see only the base-level session.
+    try tmp.dir.writeFile(.{ .sub_path = "foo.sock", .data = "" });
+    const ws = try socketDirFromFor(alloc, base, null, "proj");
+    defer alloc.free(ws);
+    {
+        const inner = try socketPath(alloc, ws, "inner");
+        defer alloc.free(inner);
+        try std.fs.cwd().writeFile(.{ .sub_path = inner, .data = "" });
+    }
+
+    const names = try listSessions(alloc, base);
+    defer {
+        for (names) |n| alloc.free(n);
+        alloc.free(names);
+    }
+    try std.testing.expectEqual(@as(usize, 1), names.len);
+    try std.testing.expectEqualStrings("foo", names[0]);
+    for (names) |n| try std.testing.expect(!std.mem.eql(u8, n, "ws"));
+}
+
+test "resolveWorkspace precedence: flag over env, empty env means none" {
+    // Flag wins over env when both are present.
+    try std.testing.expectEqualStrings("a", resolveWorkspace("a", "b").?);
+    // No flag: the env value is used.
+    try std.testing.expectEqualStrings("b", resolveWorkspace(null, "b").?);
+    // Neither: no workspace.
+    try std.testing.expect(resolveWorkspace(null, null) == null);
+    // An exported-but-empty MOO_WORKSPACE means default, not a "" workspace.
+    try std.testing.expect(resolveWorkspace(null, "") == null);
+    // Flag alone, env absent.
+    try std.testing.expectEqualStrings("a", resolveWorkspace("a", null).?);
+}
+
+test "the same session name lives independently in two workspaces" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const base = try tmp.dir.realpathAlloc(alloc, ".");
+    defer alloc.free(base);
+
+    const a = try socketDirFromFor(alloc, base, null, "a");
+    defer alloc.free(a);
+    const b = try socketDirFromFor(alloc, base, null, "b");
+    defer alloc.free(b);
+
+    // Distinct directories that do not collide.
+    try std.testing.expect(!std.mem.eql(u8, a, b));
+
+    {
+        const sa = try socketPath(alloc, a, "work");
+        defer alloc.free(sa);
+        try std.fs.cwd().writeFile(.{ .sub_path = sa, .data = "" });
+    }
+    {
+        const sb = try socketPath(alloc, b, "work");
+        defer alloc.free(sb);
+        try std.fs.cwd().writeFile(.{ .sub_path = sb, .data = "" });
+    }
+
+    const na = try listSessions(alloc, a);
+    defer {
+        for (na) |n| alloc.free(n);
+        alloc.free(na);
+    }
+    const nb = try listSessions(alloc, b);
+    defer {
+        for (nb) |n| alloc.free(n);
+        alloc.free(nb);
+    }
+    try std.testing.expectEqual(@as(usize, 1), na.len);
+    try std.testing.expectEqualStrings("work", na[0]);
+    try std.testing.expectEqual(@as(usize, 1), nb.len);
+    try std.testing.expectEqualStrings("work", nb[0]);
 }

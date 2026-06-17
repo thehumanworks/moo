@@ -17,15 +17,34 @@ workspaces feature. Do this, proactively and to completion:
 "Proactively" means: do not ask permission between tasks; advance W1→W5 (and W6
 per the open decision), self-verifying at each step. Ask only at a real Checkpoint.
 
-## Current state (snapshot 2026-06-17 — live truth = TaskList + git)
+## Current state (snapshot 2026-06-17 — DELIVERED, W6 deferred)
 
-- ✅ W0: gate recipes in `justfile` (`fmt-check`, `fmt`, `check`, `check-release`).
-- ✅ W0.1: integration harness made hermetic (clears `MOO`/`MOO_FOREGROUND`/`MOO_LOG`).
-- Baseline GREEN: `just check` exit 0, 228/228 tests, fmt clean.
-- ⏳ W1–W6 pending. Dependencies wired in the harness task list (W2←W1, W3←W2,
-  W4←W2, W5←W3,W4, W6←W2).
-- Uncommitted: `justfile`, `test/integration.zig`, `docs/workspaces/*`. `src/` is
-  clean (no production change yet). Nothing committed.
+- ✅ W0/W0.1: gate recipes + hermetic harness (baseline was 228/228 green).
+- ✅ W1: `paths.socketDirFor`/`socketDirFromFor` resolve `<base>/ws/<name>` (0700),
+  validate the name; the no-workspace path is byte-identical to before.
+- ✅ W2: `-w/--workspace` flag + `MOO_WORKSPACE` resolution (`paths.resolveWorkspace`
+  + `main.activeWorkspace`) threaded through all 10 commands.
+- ✅ W3: `createSession` exports `MOO_WORKSPACE` into each workspace session via the
+  existing `env_overrides` plumbing (no daemon change needed).
+- ✅ W4: `moo ws` (lists the default + every `ws/*` with a session count; `--json`,
+  default workspace reported as the empty string `""`).
+- ✅ W5: help (`-w/--workspace` on every session command, enriched `ws` page, new
+  `moo help workspaces` topic, overview + env block) + README Workspaces section.
+- ✅ W7 (added after W2 review): an invalid workspace name now yields a clean
+  `moo: invalid workspace name '<name>'` usage error (exit 2) via a `workspaceDir`
+  helper, instead of a raw `error: InvalidSessionName`.
+- ⏸️ W6: DEFERRED by user decision (2026-06-17). Design settled (scoped-by-default +
+  a `C-a w` toggle to a grouped all-workspaces view); it is a larger UI refactor
+  (per-entry workspace dirs + sidebar row-index/mouse math) — see the W6 task notes.
+- FINAL GATE GREEN: `just check-release` exit 0, **246/246** (162 unit + 84
+  integration), fmt clean, no flake, first attempt.
+- Every task ran the full role-separated loop (test-author → implementer →
+  adversarial reviewer → QA, all different agents).
+- Uncommitted on `main`: `src/paths.zig`, `src/main.zig`, `src/help.zig`,
+  `test/integration.zig`, `README.md`. Nothing committed/pushed (awaiting user go).
+- Operational note for re-runs: never run two `just check`/`check-release` builds
+  concurrently — parallel ReleaseSafe builds collide on the zig cache and get
+  SIGTERM-killed (exit ~143/144). Use one solo builder at a time.
 
 ## Dependency / parallelism plan
 

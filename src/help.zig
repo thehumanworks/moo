@@ -42,22 +42,32 @@ pub const overview =
     \\    rename <name> <new-name>     rename a session
     \\
     \\  Information
+    \\    ws [--json]                  list workspaces and session counts
     \\    version                      print the version
     \\    help [page]                  this overview, or detailed help
     \\
     \\Run 'moo help <command>' for flags and examples, 'moo help keys'
     \\for the key bindings inside a session, 'moo help automation' for
     \\driving moo from scripts, 'moo help agents' for wrapping coding
-    \\agents, or 'moo help --all' for every page.
+    \\agents, 'moo help workspaces' for isolating sessions by project,
+    \\or 'moo help --all' for every page.
     \\
     \\session selection:
     \\  Commands taking <name> accept a unique prefix of the session
     \\  name (e.g. 'moo attach bu' for "build").
     \\
+    \\workspaces:
+    \\  -w/--workspace <name> (or $MOO_WORKSPACE) scopes a command to a
+    \\  named workspace whose sessions are isolated from every other
+    \\  workspace's. See 'moo help workspaces'.
+    \\
     \\environment:
-    \\  MOO_DIR  socket directory
-    \\           (default: $XDG_RUNTIME_DIR/moo, else /tmp/moo-<uid>)
-    \\  MOO_LOG  append daemon logs to this file (debugging)
+    \\  MOO_DIR        socket directory
+    \\                 (default: $XDG_RUNTIME_DIR/moo, else /tmp/moo-<uid>)
+    \\  MOO_WORKSPACE  default workspace for commands run without -w;
+    \\                 exported into each workspace session (see
+    \\                 'moo help workspaces')
+    \\  MOO_LOG        append daemon logs to this file (debugging)
     \\
 ;
 
@@ -85,6 +95,10 @@ pub const commands = [_]Entry{
         \\                   augmented (e.g. a pinned session id) and a
         \\                   sidecar records where the transcript lives.
         \\                   A command after '--' overrides the default.
+        \\  -w, --workspace <name>
+        \\                   create the session in a named workspace,
+        \\                   isolated from sessions in other workspaces
+        \\                   (see 'moo help workspaces')
         \\
         \\examples:
         \\  moo new                      interactive shell, attach now
@@ -92,6 +106,7 @@ pub const commands = [_]Entry{
         \\  moo new build -d -- make -j  background a build
         \\  moo new bot --agent claude   wrap Claude Code, attach now
         \\  moo new cx -d --agent codex  background codex; read it later
+        \\  moo new api -w proj -d -- bash   in the "proj" workspace
         \\
         ,
     },
@@ -113,6 +128,10 @@ pub const commands = [_]Entry{
         \\Inside the session, press C-a d to detach. See 'moo help
         \\keys' for all bindings.
         \\
+        \\flags:
+        \\  -w, --workspace <name>   attach a session in a named
+        \\                           workspace (see 'moo help workspaces')
+        \\
         \\examples:
         \\  moo attach build     reattach "build"
         \\  moo at bu            the same, by prefix
@@ -130,6 +149,10 @@ pub const commands = [_]Entry{
         \\every session (window title underneath) and the focused
         \\session runs in a viewport on the right, rendered live from
         \\terminal state.
+        \\
+        \\flags:
+        \\  -w, --workspace <name>   manage a named workspace's sessions
+        \\                           (see 'moo help workspaces')
         \\
         \\mouse:
         \\  click a session     focus it (steals politely, like attach)
@@ -187,6 +210,36 @@ pub const commands = [_]Entry{
         \\flags:
         \\  --json  emit a JSON array:
         \\          [{"name","attached","idle_ms","title"}]
+        \\  -w, --workspace <name>
+        \\          list only the named workspace's sessions
+        \\          (see 'moo help workspaces')
+        \\
+        ,
+    },
+    .{
+        .name = "ws",
+        .body =
+        \\usage: moo ws [--json]
+        \\
+        \\List every workspace and how many live sessions each holds. The
+        \\default workspace (sessions created without -w) is listed first
+        \\as "(default)", followed by every named workspace in name order.
+        \\Each existing workspace appears even when its count is 0, so a
+        \\workspace you created but later emptied is still visible.
+        \\
+        \\Unlike the session commands, 'ws' is global: it does not take a
+        \\-w/--workspace flag and is unaffected by $MOO_WORKSPACE.
+        \\
+        \\flags:
+        \\  --json  emit a JSON array: [{"workspace","sessions"}], default
+        \\          first. The default workspace is reported with the
+        \\          empty-string name "" (a real workspace name can never
+        \\          be empty), so scripts can distinguish it from a named
+        \\          one without matching the "(default)" label.
+        \\
+        \\examples:
+        \\  moo ws                       a WORKSPACE / SESSIONS table
+        \\  moo ws --json | jq .         per-workspace counts, for scripts
         \\
         ,
     },
@@ -209,6 +262,8 @@ pub const commands = [_]Entry{
         \\                 Up, Down, Left, Right, Home, End, C-a..C-z.
         \\                 Cannot be combined with --text; use two calls.
         \\  --stdin        force reading from stdin
+        \\  -w, --workspace <name>   target a session in a named workspace
+        \\                 (see 'moo help workspaces')
         \\
         \\examples:
         \\  moo send build --text 'make test' --enter   run a command
@@ -230,6 +285,8 @@ pub const commands = [_]Entry{
         \\  --scrollback  include the full scrollback history
         \\  --json        emit {"session","title","rows","cols",
         \\                "cursor":{"row","col"},"screen"}
+        \\  -w, --workspace <name>   target a session in a named workspace
+        \\                (see 'moo help workspaces')
         \\
         \\examples:
         \\  moo peek build | tail -20
@@ -264,6 +321,8 @@ pub const commands = [_]Entry{
         \\  --agent <a>  read a transcript file directly (claude, codex,
         \\               pi); pass the path positionally or via --file
         \\  --file <p>   the transcript file (alternative to positional)
+        \\  -w, --workspace <name>   target a session in a named workspace
+        \\               (see 'moo help workspaces')
         \\
         \\Agent state is read from the transcript, so a permission or
         \\approval prompt that never reaches disk reads as 'running'.
@@ -292,6 +351,8 @@ pub const commands = [_]Entry{
         \\  --idle           until the session has produced no output
         \\                   for 2 seconds
         \\  --timeout <dur>  give up and exit 4 (default: 30s)
+        \\  -w, --workspace <name>   target a session in a named workspace
+        \\                   (see 'moo help workspaces')
         \\
         \\Durations are an integer with a unit: 500ms, 2s, 1m, 4h
         \\(or 4hr), 1d. Flags also accept --flag=value.
@@ -310,9 +371,15 @@ pub const commands = [_]Entry{
         \\End a session: its process receives SIGHUP and the daemon
         \\exits. --all ends every session and sweeps stale sockets.
         \\
+        \\flags:
+        \\  -w, --workspace <name>   act within a named workspace; --all
+        \\                           then ends only that workspace's
+        \\                           sessions (see 'moo help workspaces')
+        \\
         \\examples:
         \\  moo kill build
         \\  moo kill --all
+        \\  moo kill --all -w proj   end only the "proj" workspace
         \\
         ,
     },
@@ -324,6 +391,10 @@ pub const commands = [_]Entry{
         \\Rename a session. The running program is unaffected and an
         \\attached client stays attached. The old name accepts a
         \\unique prefix, like attach.
+        \\
+        \\flags:
+        \\  -w, --workspace <name>   rename a session in a named workspace
+        \\                           (see 'moo help workspaces')
         \\
         \\example:
         \\  moo rename work api-server
@@ -346,10 +417,11 @@ pub const commands = [_]Entry{
         \\
         \\Show the overview or a detailed page. There is a page for
         \\every command, plus 'keys' (the C-a bindings inside a
-        \\session) and 'automation' (driving moo from scripts and AI
-        \\agents). --all prints every page in one pass, which is handy
-        \\for piping into a pager or for tools that want to learn the
-        \\whole CLI in one call.
+        \\session), 'automation' (driving moo from scripts and AI
+        \\agents), 'agents' (wrapping coding agents), and 'workspaces'
+        \\(isolating sessions by project). --all prints every page in
+        \\one pass, which is handy for piping into a pager or for tools
+        \\that want to learn the whole CLI in one call.
         \\
         ,
     },
@@ -472,6 +544,65 @@ pub const topics = [_]Entry{
         \\  - codex encrypts its reasoning, so --thinking is a no-op there.
         \\  - 'moo read <name>' needs a live session; to read a finished
         \\    or saved log use 'moo read --agent <agent> <file>'.
+        \\
+        ,
+    },
+    .{
+        .name = "workspaces",
+        .body =
+        \\Isolating sessions by project with workspaces
+        \\
+        \\A workspace is a named, isolated group of sessions. Without one,
+        \\every 'moo' command shares a single default namespace; with one,
+        \\commands see only that workspace's sessions. This keeps unrelated
+        \\projects from colliding: the same session name (say "build") can
+        \\exist independently in two workspaces, and 'ls', 'kill --all', and
+        \\'new' in one workspace physically cannot see or touch the other.
+        \\
+        \\selecting a workspace:
+        \\  -w, --workspace <name>   scope this command to <name>
+        \\  $MOO_WORKSPACE           default workspace when -w is absent
+        \\
+        \\  The flag wins; otherwise $MOO_WORKSPACE is used; with neither,
+        \\  the command targets the default (unnamed) workspace, exactly as
+        \\  moo behaved before workspaces existed. Both spellings (-w,
+        \\  --workspace) and both forms (-w proj, --workspace=proj) work.
+        \\  Every session command accepts it: new, attach, ui, ls, send,
+        \\  peek, read, wait, kill, rename. 'ws' itself is global and takes
+        \\  no -w.
+        \\
+        \\  Workspace names use the same character set as session names:
+        \\  letters, digits, '.', '_', '-', no leading '.' or '-'. An
+        \\  invalid name is a usage error (exit 2).
+        \\
+        \\listing them:
+        \\  moo ws            a WORKSPACE / SESSIONS table, default first
+        \\  moo ws --json     [{"workspace","sessions"}]; default is ""
+        \\
+        \\on disk:
+        \\  The socket directory ($MOO_DIR, else $XDG_RUNTIME_DIR/moo, else
+        \\  /tmp/moo-<uid>) is the default workspace. A named workspace is
+        \\  just a subdirectory of it, "<dir>/ws/<name>" (mode 0700), with
+        \\  its own sockets. Default (unnamed) sessions stay at the top
+        \\  level, untouched. Isolation is structural: each command resolves
+        \\  one directory and looks no further.
+        \\
+        \\confining an orchestrator:
+        \\  When a session belongs to a workspace, the daemon exports
+        \\  MOO_WORKSPACE=<name> into that session's environment. So a
+        \\  process running inside the session inherits it, and every 'moo'
+        \\  command that process runs is automatically confined to the same
+        \\  workspace. A coding agent driving moo from inside a workspace
+        \\  session therefore cannot enumerate or kill sessions belonging to
+        \\  other projects. A default (unnamed) session leaves MOO_WORKSPACE
+        \\  unset.
+        \\
+        \\example:
+        \\  moo new api -w proj -d -- bash   # a session in "proj"
+        \\  moo ls -w proj                   # only "proj" sessions
+        \\  moo new api -d -- bash           # a separate "api" in default
+        \\  moo ws                           # see both, with counts
+        \\  moo kill --all -w proj           # end only "proj"
         \\
         ,
     },
