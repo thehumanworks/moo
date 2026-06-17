@@ -9,3 +9,8 @@ mise.local.lock
 
 # Zig 0.16 fetch dir (we build with pinned 0.15.2)
 zig-pkg/
+
+# SwiftPM / app artifacts
+.build/
+apps/macos/MooDeck/.build/
+dist/

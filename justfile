@@ -37,11 +37,11 @@ test-all:
 
 # Check formatting without writing (CI parity).
 fmt-check:
-    {{zig}} fmt --check build.zig build.zig.zon src test
+    {{zig}} fmt --check build.zig build.zig.zon packages/moo-cli/src packages/moo-cli/test packages/moo-cli/bench
 
 # Apply formatting in place.
 fmt:
-    {{zig}} fmt build.zig build.zig.zon src test
+    {{zig}} fmt build.zig build.zig.zon packages/moo-cli/src packages/moo-cli/test packages/moo-cli/bench
 
 # Full local gate: format check + build + unit + PTY integration tests.
 # This is the per-task "definition of done" check; mirrors what CI enforces.
@@ -87,4 +87,25 @@ uninstall:
 
 # Remove build artifacts.
 clean:
-    rm -rf zig-out .zig-cache
+    rm -rf zig-out .zig-cache apps/macos/MooDeck/.build dist
+
+# Build the macOS app bundle.
+app-build:
+    script/build_and_run.sh --build-only
+
+# Test the macOS app package.
+app-test:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [ -z "${DEVELOPER_DIR:-}" ] && [ -d /Applications/Xcode-beta.app/Contents/Developer ]; then
+        export DEVELOPER_DIR=/Applications/Xcode-beta.app/Contents/Developer
+    fi
+    swift test --package-path apps/macos/MooDeck
+
+# Build and launch the macOS app bundle.
+app-run:
+    script/build_and_run.sh
+
+# Build, test, bundle, and verify the macOS app launches.
+app-check:
+    script/build_and_run.sh --verify

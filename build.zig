@@ -13,7 +13,7 @@ pub fn build(b: *std.Build) void {
 
     // Main executable module.
     const exe_mod = b.createModule(.{
-        .root_source_file = b.path("src/main.zig"),
+        .root_source_file = b.path("packages/moo-cli/src/main.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
@@ -54,7 +54,7 @@ pub fn build(b: *std.Build) void {
     test_opts.addOptionPath("exe_path", exe.getEmittedBin());
 
     const integration_mod = b.createModule(.{
-        .root_source_file = b.path("test/integration.zig"),
+        .root_source_file = b.path("packages/moo-cli/test/integration.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
@@ -83,7 +83,7 @@ pub fn build(b: *std.Build) void {
 
     // Benchmark: the viewport render hot path (no TTY required).
     const bench_mod = b.createModule(.{
-        .root_source_file = b.path("bench/render.zig"),
+        .root_source_file = b.path("packages/moo-cli/bench/render.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,

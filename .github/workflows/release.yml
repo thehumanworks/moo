@@ -25,7 +25,7 @@ jobs:
         run: |
           version="${GITHUB_REF_NAME#v}"
           grep -Fq ".version = \"$version\"" build.zig.zon
-          grep -Fq "pub const version = \"$version\"" src/main.zig
+          grep -Fq "pub const version = \"$version\"" packages/moo-cli/src/main.zig
       - name: Fetch dependencies (with retry)
         run: |
           for i in 1 2 3 4 5; do
@@ -41,8 +41,8 @@ jobs:
           mkdir -p dist
           for target in x86_64-linux-musl aarch64-linux-musl x86_64-macos aarch64-macos; do
             zig build -Dtarget="$target" -Doptimize=ReleaseSafe -p "zig-out/$target"
-            asset="boo-${target%-musl}"
-            tar -czf "dist/$asset.tar.gz" -C "zig-out/$target/bin" boo
+            asset="moo-${target%-musl}"
+            tar -czf "dist/$asset.tar.gz" -C "zig-out/$target/bin" moo
           done
       - name: Generate checksums
         run: cd dist && sha256sum *.tar.gz > SHA256SUMS
@@ -54,4 +54,4 @@ jobs:
             --title "$GITHUB_REF_NAME" \
             --verify-tag \
             --generate-notes \
-            --notes "Install: \`curl -fsSL https://raw.githubusercontent.com/coder/boo/main/install.sh | sh\`"
+            --notes "Install: \`curl -fsSL https://raw.githubusercontent.com/coder/moo/main/install.sh | sh\`"

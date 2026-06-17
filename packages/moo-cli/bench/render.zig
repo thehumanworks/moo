@@ -1,4 +1,4 @@
-//! Microbenchmark for the `boo ui` viewport render hot path.
+//! Microbenchmark for the `moo ui` viewport render hot path.
 //!
 //! Compares serialization strategies for one repaint frame:
 //!   A_full  status quo: a fresh Allocating writer per row, all rows.
@@ -105,7 +105,7 @@ fn fillScreen(alloc: std.mem.Allocator, term: *vt.Terminal) !void {
 }
 
 pub fn main() !void {
-    // boo runs on the C allocator at runtime (src/main.zig); benchmark
+    // moo runs on the C allocator at runtime (src/main.zig); benchmark
     // with the same one so per-row allocation cost is realistic.
     const base = std.heap.c_allocator;
 
@@ -113,7 +113,7 @@ pub fn main() !void {
     var stdout_w = std.fs.File.stdout().writer(&stdout_buf);
     const out = &stdout_w.interface;
 
-    try out.print("boo ui render bench: {d} rows x {d} cols, {d} frames\n\n", .{ rows, cols, frames });
+    try out.print("moo ui render bench: {d} rows x {d} cols, {d} frames\n\n", .{ rows, cols, frames });
 
     // --- A_full: status quo, all rows, per-row Allocating ---
     {

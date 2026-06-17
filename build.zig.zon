@@ -1,7 +1,7 @@
 .{
-    .name = .boo,
+    .name = .moo,
     .version = "0.5.20",
-    .fingerprint = 0x8b7acdfd255f0e34,
+    .fingerprint = 0x80268ac0121f1fe7,
     .minimum_zig_version = "0.15.2",
     .dependencies = .{
         .ghostty = .{
@@ -12,8 +12,12 @@
     .paths = .{
         "build.zig",
         "build.zig.zon",
-        "src",
-        "test",
+        "packages/moo-cli/src",
+        "packages/moo-cli/test",
+        "packages/moo-cli/bench",
+        "apps/macos/MooDeck",
+        "script/build_and_run.sh",
+        ".codex/environments/environment.toml",
         "README.md",
         "LICENSE",
     },

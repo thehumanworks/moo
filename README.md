@@ -222,6 +222,16 @@ zig build test-all             # everything
 The libghostty dependency is fetched and built from source
 automatically (pinned in `build.zig.zon`).
 
+The repo is laid out as a small monorepo:
+
+```
+packages/moo-cli/              # Zig persistence engine and CLI
+apps/macos/MooDeck/            # SwiftUI macOS terminal workspace app
+```
+
+The root `build.zig` continues to build the CLI package. The macOS app can be
+built and launched with `just app-run`, or verified with `just app-check`.
+
 With Nix, `nix develop` opens a shell with the right Zig version, and
 `nix build` builds the package to `./result/bin/moo`.
 
@@ -233,10 +243,10 @@ your terminal <-(raw tty)-> moo client <-(unix socket)-> session daemon
 ```
 
 - The **client** puts your TTY in raw mode and shuttles bytes over a
-  framed Unix-socket protocol (`src/protocol.zig`).
+  framed Unix-socket protocol (`packages/moo-cli/src/protocol.zig`).
 - The **daemon** (forked on session creation) owns the session's
   command: a PTY-attached child whose output feeds a persistent
-  `ghostty-vt` `TerminalStream` (`src/window.zig`).
+  `ghostty-vt` `TerminalStream` (`packages/moo-cli/src/window.zig`).
 - While attached, output is passed through to your terminal byte for
   byte. On attach the daemon sanitizes your terminal and replays the
   screen from libghostty state using its VT `TerminalFormatter`.
