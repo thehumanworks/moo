@@ -239,7 +239,19 @@ const PtyClient = struct {
         rows: u16,
         cols: u16,
     ) !PtyClient {
-        return spawnProgram(harness, exe_path, argv, rows, cols);
+        return spawnWithEnv(harness, argv, rows, cols, &.{});
+    }
+
+    /// Like spawn, but with explicit environment overrides. The default spawn
+    /// path stays hermetic; tests that need MOO_WORKSPACE must opt in here.
+    fn spawnWithEnv(
+        harness: *Harness,
+        argv: []const []const u8,
+        rows: u16,
+        cols: u16,
+        env_overrides: []const [2][]const u8,
+    ) !PtyClient {
+        return spawnProgramWithEnv(harness, exe_path, argv, rows, cols, env_overrides);
     }
 
     /// Like spawn, but runs an arbitrary program instead of the moo
@@ -251,6 +263,17 @@ const PtyClient = struct {
         argv: []const []const u8,
         rows: u16,
         cols: u16,
+    ) !PtyClient {
+        return spawnProgramWithEnv(harness, program, argv, rows, cols, &.{});
+    }
+
+    fn spawnProgramWithEnv(
+        harness: *Harness,
+        program: []const u8,
+        argv: []const []const u8,
+        rows: u16,
+        cols: u16,
+        env_overrides: []const [2][]const u8,
     ) !PtyClient {
         const alloc = harness.alloc;
 
@@ -297,6 +320,8 @@ const PtyClient = struct {
         env.remove("MOO");
         env.remove("MOO_FOREGROUND");
         env.remove("MOO_LOG");
+        env.remove("MOO_WORKSPACE");
+        for (env_overrides) |entry| try env.put(entry[0], entry[1]);
         try env.put("MOO_DIR", harness.dir);
         const envp = try std.process.createEnvironFromMap(arena, &env, .{});
 
@@ -1752,14 +1777,106 @@ test "ws --json with no workspaces returns just the default entry" {
 
 // -- moo ui -------------------------------------------------------------------
 
-fn uiSessionCount(h: *Harness) !usize {
-    const result = try h.run(&.{ "ls", "--json" });
+fn runLsJson(
+    h: *Harness,
+    ls_args: []const []const u8,
+) !std.process.Child.RunResult {
+    var argv: std.ArrayList([]const u8) = .empty;
+    defer argv.deinit(h.alloc);
+    try argv.append(h.alloc, "ls");
+    try argv.appendSlice(h.alloc, ls_args);
+    try argv.append(h.alloc, "--json");
+    return h.run(argv.items);
+}
+
+fn lsSessionCount(h: *Harness, ls_args: []const []const u8) !usize {
+    const result = try runLsJson(h, ls_args);
     defer h.alloc.free(result.stdout);
     defer h.alloc.free(result.stderr);
     if (result.term != .Exited or result.term.Exited != 0) return error.LsFailed;
     var parsed = try std.json.parseFromSlice(std.json.Value, h.alloc, result.stdout, .{});
     defer parsed.deinit();
     return parsed.value.array.items.len;
+}
+
+fn uiSessionCount(h: *Harness) !usize {
+    return lsSessionCount(h, &.{});
+}
+
+const ScopedUiCounts = struct {
+    target: usize,
+    default: usize,
+    unrelated: usize,
+};
+
+fn scopedUiCounts(
+    h: *Harness,
+    target_workspace: []const u8,
+    unrelated_workspace: []const u8,
+) !ScopedUiCounts {
+    return .{
+        .target = try lsSessionCount(h, &.{ "-w", target_workspace }),
+        .default = try lsSessionCount(h, &.{}),
+        .unrelated = try lsSessionCount(h, &.{ "-w", unrelated_workspace }),
+    };
+}
+
+fn waitScopedUiCreateCountChange(
+    h: *Harness,
+    target_workspace: []const u8,
+    unrelated_workspace: []const u8,
+    before: ScopedUiCounts,
+) !ScopedUiCounts {
+    var deadline = Deadline.init(default_timeout_ms);
+    while (true) {
+        const after = try scopedUiCounts(h, target_workspace, unrelated_workspace);
+        if (after.target != before.target or
+            after.default != before.default or
+            after.unrelated != before.unrelated)
+        {
+            return after;
+        }
+        try deadline.tick("scoped ui create did not change any workspace count");
+    }
+}
+
+fn onlyLsSessionName(h: *Harness, ls_args: []const []const u8) ![]u8 {
+    const result = try runLsJson(h, ls_args);
+    defer h.alloc.free(result.stdout);
+    defer h.alloc.free(result.stderr);
+    if (result.term != .Exited or result.term.Exited != 0) return error.LsFailed;
+    var parsed = try std.json.parseFromSlice(std.json.Value, h.alloc, result.stdout, .{});
+    defer parsed.deinit();
+    try std.testing.expectEqual(@as(usize, 1), parsed.value.array.items.len);
+    return h.alloc.dupe(u8, parsed.value.array.items[0].object.get("name").?.string);
+}
+
+fn expectScopedUiCreateInWorkspace(
+    h: *Harness,
+    ui: *PtyClient,
+    target_workspace: []const u8,
+    unrelated_workspace: []const u8,
+) !void {
+    const before = try scopedUiCounts(h, target_workspace, unrelated_workspace);
+    try std.testing.expectEqual(@as(usize, 0), before.target);
+    try std.testing.expectEqual(@as(usize, 1), before.default);
+    try std.testing.expectEqual(@as(usize, 1), before.unrelated);
+
+    ui.clearOutput();
+    try ui.send("\x01c");
+    const after = try waitScopedUiCreateCountChange(
+        h,
+        target_workspace,
+        unrelated_workspace,
+        before,
+    );
+    try std.testing.expectEqual(before.target + 1, after.target);
+    try std.testing.expectEqual(before.default, after.default);
+    try std.testing.expectEqual(before.unrelated, after.unrelated);
+
+    const created = try onlyLsSessionName(h, &.{ "-w", target_workspace });
+    defer h.alloc.free(created);
+    try ui.waitFor(created);
 }
 
 fn waitUiSessionCount(h: *Harness, want: usize) !void {
@@ -2029,6 +2146,37 @@ test "ui: create and kill sessions from the ui" {
     defer alloc.free(ls.stderr);
     try std.testing.expect(std.mem.indexOf(u8, ls.stdout, "keep1") != null);
     try std.testing.expect(std.mem.indexOf(u8, ls.stdout, "keep2") != null);
+}
+
+test "ui: create from -w workspace stays in that workspace" {
+    const alloc = std.testing.allocator;
+    var h = try Harness.init(alloc);
+    defer h.deinit();
+
+    try h.startDetached("base", &.{"cat"});
+    try startDetachedWs(&h, "other", "elsewhere", &.{"cat"});
+
+    var ui = try PtyClient.spawn(&h, &.{ "ui", "-w", "proj" }, 24, 100);
+    defer ui.deinit();
+    try ui.waitFor("no sessions");
+
+    try expectScopedUiCreateInWorkspace(&h, &ui, "proj", "other");
+}
+
+test "ui: create from MOO_WORKSPACE stays in that workspace" {
+    const alloc = std.testing.allocator;
+    var h = try Harness.init(alloc);
+    defer h.deinit();
+
+    try h.startDetached("base", &.{"cat"});
+    try startDetachedWs(&h, "other", "elsewhere", &.{"cat"});
+
+    const env = [_][2][]const u8{.{ "MOO_WORKSPACE", "proj" }};
+    var ui = try PtyClient.spawnWithEnv(&h, &.{"ui"}, 24, 100, &env);
+    defer ui.deinit();
+    try ui.waitFor("no sessions");
+
+    try expectScopedUiCreateInWorkspace(&h, &ui, "proj", "other");
 }
 
 test "ui: clicking the kill target asks for confirmation" {

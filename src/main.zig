@@ -137,6 +137,10 @@ fn activeWorkspace(flag: ?[]const u8) ?[]const u8 {
 /// error.InvalidSessionName propagate raw to main.
 fn workspaceDir(comptime cmd: []const u8, alloc: std.mem.Allocator, ws_flag: ?[]const u8) ![]u8 {
     const ws = activeWorkspace(ws_flag);
+    return workspaceDirForActive(cmd, alloc, ws);
+}
+
+fn workspaceDirForActive(comptime cmd: []const u8, alloc: std.mem.Allocator, ws: ?[]const u8) ![]u8 {
     return paths.socketDirFor(alloc, ws) catch |err| switch (err) {
         error.InvalidSessionName => usageFail(cmd, "invalid workspace name '{s}'", .{ws.?}),
         else => return err,
@@ -289,10 +293,7 @@ fn cmdNew(alloc: std.mem.Allocator, args: []const [:0]const u8) !void {
     }
 
     const ws = activeWorkspace(ws_flag);
-    const dir = paths.socketDirFor(alloc, ws) catch |err| switch (err) {
-        error.InvalidSessionName => usageFail("new", "invalid workspace name '{s}'", .{ws.?}),
-        else => return err,
-    };
+    const dir = try workspaceDirForActive("new", alloc, ws);
     defer alloc.free(dir);
     return createSession(alloc, dir, name, detached, agent, ws, @ptrCast(cmd_argv));
 }
@@ -509,9 +510,10 @@ fn cmdUi(alloc: std.mem.Allocator, args: []const [:0]const u8) !void {
         }
     }
 
-    const dir = try workspaceDir("ui", alloc, ws_flag);
+    const ws = activeWorkspace(ws_flag);
+    const dir = try workspaceDirForActive("ui", alloc, ws);
     defer alloc.free(dir);
-    ui.run(alloc, dir) catch |err| switch (err) {
+    ui.run(alloc, dir, ws) catch |err| switch (err) {
         error.NotATty => fail(exit_runtime, "ui requires a terminal", .{}),
         else => return err,
     };

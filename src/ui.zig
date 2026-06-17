@@ -992,11 +992,11 @@ const enter_sequence =
 /// reset_state_sequence turns every mode above back off.
 const restore_sequence = windowpkg.reset_state_sequence ++ "\x1b[?1049l";
 
-pub fn run(alloc: std.mem.Allocator, dir: []const u8) !void {
+pub fn run(alloc: std.mem.Allocator, dir: []const u8, workspace: ?[]const u8) !void {
     const tty: posix.fd_t = 0;
     if (!posix.isatty(tty)) return error.NotATty;
 
-    var ui: Ui = .{ .alloc = alloc, .dir = dir, .tty = tty };
+    var ui: Ui = .{ .alloc = alloc, .dir = dir, .workspace = workspace, .tty = tty };
     defer ui.deinit();
 
     // Signal plumbing mirrors client.attach: WINCH relayouts,
@@ -1081,6 +1081,7 @@ fn viewportRowReusable(entry: *const ViewportRow, pin: vt.Pin, full_render: bool
 const Ui = struct {
     alloc: std.mem.Allocator,
     dir: []const u8,
+    workspace: ?[]const u8,
     tty: posix.fd_t,
 
     layout: Layout = .{ .rows = 24, .cols = 80, .sidebar_w = 24 },
@@ -2408,9 +2409,14 @@ const Ui = struct {
         };
         defer self.alloc.free(exe);
 
+        const argv: []const []const u8 = if (self.workspace) |ws|
+            &.{ exe, "new", "-w", ws, "-d" }
+        else
+            &.{ exe, "new", "-d" };
+
         const result = std.process.Child.run(.{
             .allocator = self.alloc,
-            .argv = &.{ exe, "new", "-d" },
+            .argv = argv,
         }) catch {
             self.setMessage("create failed", .{});
             return;
@@ -3714,7 +3720,7 @@ test "parser: paste markers still decode while modify is mirrored" {
 
 test "ui: automatic focus skips attached sessions and prefers recent ones" {
     const alloc = std.testing.allocator;
-    var ui: Ui = .{ .alloc = alloc, .dir = "", .tty = -1 };
+    var ui: Ui = .{ .alloc = alloc, .dir = "", .workspace = null, .tty = -1 };
     defer ui.sessions.deinit(alloc);
 
     var aa = "aa".*;
@@ -3741,7 +3747,7 @@ test "ui: automatic focus skips attached sessions and prefers recent ones" {
 
 test "ui: an empty viewport shows the splash, not a placard" {
     const alloc = std.testing.allocator;
-    var ui: Ui = .{ .alloc = alloc, .dir = "", .tty = -1 };
+    var ui: Ui = .{ .alloc = alloc, .dir = "", .workspace = null, .tty = -1 };
     defer ui.sessions.deinit(alloc);
     ui.layout = .init(24, 100);
 
@@ -3770,7 +3776,7 @@ test "ui: an empty viewport shows the splash, not a placard" {
 
 test "ui: splash ASCII title spells moo with two o's" {
     const alloc = std.testing.allocator;
-    var ui: Ui = .{ .alloc = alloc, .dir = "", .tty = -1 };
+    var ui: Ui = .{ .alloc = alloc, .dir = "", .workspace = null, .tty = -1 };
     defer ui.sessions.deinit(alloc);
     ui.layout = .init(24, 100);
 
@@ -3795,7 +3801,7 @@ test "ui: splash ASCII title spells moo with two o's" {
 
 test "ui: goto matches prefer name prefixes over substrings" {
     const alloc = std.testing.allocator;
-    var ui: Ui = .{ .alloc = alloc, .dir = "", .tty = -1 };
+    var ui: Ui = .{ .alloc = alloc, .dir = "", .workspace = null, .tty = -1 };
     defer ui.sessions.deinit(alloc);
 
     var build = "build".*;
@@ -3855,6 +3861,7 @@ test "ui: sidebar resize clamps to the layout bounds" {
     var ui: Ui = .{
         .alloc = std.testing.allocator,
         .dir = "",
+        .workspace = null,
         .tty = -1,
     };
     ui.layout = .{ .rows = 24, .cols = 100, .sidebar_w = 24 };
@@ -3900,6 +3907,7 @@ test "ui: sidebar toggle hides and restores, cancelling a browse" {
     var ui: Ui = .{
         .alloc = std.testing.allocator,
         .dir = "",
+        .workspace = null,
         .tty = -1,
     };
     ui.layout = .{ .rows = 24, .cols = 100, .sidebar_w = 30 };
@@ -3920,7 +3928,7 @@ test "ui: sidebar toggle hides and restores, cancelling a browse" {
 
 test "ui: sidebar arrows reveal a hidden sidebar" {
     const alloc = std.testing.allocator;
-    var ui: Ui = .{ .alloc = alloc, .dir = "", .tty = -1 };
+    var ui: Ui = .{ .alloc = alloc, .dir = "", .workspace = null, .tty = -1 };
     defer ui.sessions.deinit(alloc);
     ui.layout = .{ .rows = 24, .cols = 100, .sidebar_w = 24, .hidden = true };
 
