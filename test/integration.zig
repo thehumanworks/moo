@@ -82,6 +82,13 @@ const Harness = struct {
 
         var env = try std.process.getEnvMap(self.alloc);
         defer env.deinit();
+        // Hermetic: never inherit the developer's own moo session config.
+        // A leaked MOO (the host session name) makes the UI treat a
+        // same-named session as its host and refuse to focus it, which
+        // only reproduces when the suite is run from inside a moo session.
+        env.remove("MOO");
+        env.remove("MOO_FOREGROUND");
+        env.remove("MOO_LOG");
         try env.put("MOO_DIR", self.dir);
 
         return std.process.Child.run(.{
@@ -258,6 +265,11 @@ const PtyClient = struct {
         for (argv, 1..) |arg, i| argv_z[i] = try arena.dupeZ(u8, arg);
 
         var env = try std.process.getEnvMap(arena);
+        // Hermetic: drop the developer's own moo session config, as in
+        // Harness.runIn — a leaked MOO would set host_name in the UI.
+        env.remove("MOO");
+        env.remove("MOO_FOREGROUND");
+        env.remove("MOO_LOG");
         try env.put("MOO_DIR", harness.dir);
         const envp = try std.process.createEnvironFromMap(arena, &env, .{});
 

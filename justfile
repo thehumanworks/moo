@@ -35,6 +35,22 @@ test:
 test-all:
     {{zig}} build test-all
 
+# Check formatting without writing (CI parity).
+fmt-check:
+    {{zig}} fmt --check build.zig build.zig.zon src test
+
+# Apply formatting in place.
+fmt:
+    {{zig}} fmt build.zig build.zig.zon src test
+
+# Full local gate: format check + build + unit + PTY integration tests.
+# This is the per-task "definition of done" check; mirrors what CI enforces.
+check: fmt-check build test-all
+
+# Stricter gate under ReleaseSafe (CI runs this too); use before merge.
+check-release: fmt-check
+    {{zig}} build test-all -Doptimize=ReleaseSafe
+
 # Build and run moo, forwarding any extra args (e.g. `just run -- ls`).
 run *args:
     {{zig}} build run -- {{args}}
