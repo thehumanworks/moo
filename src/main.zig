@@ -513,11 +513,18 @@ fn cmdUi(alloc: std.mem.Allocator, args: []const [:0]const u8) !void {
     const ws = activeWorkspace(ws_flag);
     const dir = try workspaceDirForActive("ui", alloc, ws);
     defer alloc.free(dir);
-    ui.run(alloc, dir, ws) catch |err| switch (err) {
+    const outcome = ui.run(alloc, dir, ws) catch |err| switch (err) {
         error.NotATty => fail(exit_runtime, "ui requires a terminal", .{}),
         else => return err,
     };
-    std.debug.print("[moo ui closed]\n", .{});
+    switch (outcome) {
+        .closed => std.debug.print("[moo ui closed]\n", .{}),
+        .stolen => std.debug.print("[moo ui attached elsewhere]\n", .{}),
+        .lost => {
+            std.debug.print("[lost connection to moo ui]\n", .{});
+            posix.exit(exit_runtime);
+        },
+    }
 }
 
 fn cmdLs(alloc: std.mem.Allocator, args: []const [:0]const u8) !void {

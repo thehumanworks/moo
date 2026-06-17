@@ -125,6 +125,18 @@ pub fn socketPath(alloc: std.mem.Allocator, dir: []const u8, name: []const u8) !
     return std.fs.path.join(alloc, &.{ dir, file });
 }
 
+/// Per-workspace persistent UI manager socket. The basename is an invalid
+/// session name (leading dot), so listSessions naturally ignores it.
+pub fn uiManagerSocketPath(alloc: std.mem.Allocator, dir: []const u8) ![]u8 {
+    return std.fs.path.join(alloc, &.{ dir, ".moo-ui.sock" });
+}
+
+/// Per-workspace persistent UI manager identity sidecar. Tests use this to
+/// prove reconnect hit the same manager instead of a fresh auto-selected UI.
+pub fn uiManagerIdPath(alloc: std.mem.Allocator, dir: []const u8) ![]u8 {
+    return std.fs.path.join(alloc, &.{ dir, ".moo-ui.id" });
+}
+
 /// Per-session agent sidecar: "<dir>/<name>.agent" (a JSON file recording the
 /// harness, session id, and transcript store). Lives beside the socket but is
 /// invisible to listSessions, which only matches "*.sock".

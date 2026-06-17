@@ -43,6 +43,11 @@ const render_interval_ms: i64 = 15;
 /// after this long without a follow-up byte. Escape sequences arrive
 /// as one chunk, so only a human pressing the ESC key waits this long.
 const esc_flush_ms: i64 = 50;
+/// If a manager starts but the viewer dies before the attach handshake,
+/// exit after a short grace instead of leaking an empty daemon.
+const manager_startup_idle_ms: i64 = 5000;
+/// A socket that accepts the viewer but never sends a manager hello is stale.
+const manager_handshake_timeout_ms: i64 = 2000;
 /// Rows per mouse wheel tick, both for paging local scrollback and
 /// for the arrow keys sent to alternate-screen applications.
 const wheel_lines = 3;
@@ -992,15 +997,39 @@ const enter_sequence =
 /// reset_state_sequence turns every mode above back off.
 const restore_sequence = windowpkg.reset_state_sequence ++ "\x1b[?1049l";
 
-pub fn run(alloc: std.mem.Allocator, dir: []const u8, workspace: ?[]const u8) !void {
+pub const Outcome = enum { closed, stolen, lost };
+
+pub fn run(alloc: std.mem.Allocator, dir: []const u8, workspace: ?[]const u8) !Outcome {
+    const sock = try paths.uiManagerSocketPath(alloc, dir);
+    defer alloc.free(sock);
+
+    var retry = false;
+    while (true) {
+        return runViewer(alloc, sock) catch |err| switch (err) {
+            error.FileNotFound, error.ConnectionRefused, error.ConnectionLost, error.BrokenPipe, error.BadResponse => {
+                if (retry) return err;
+                retry = true;
+                std.fs.cwd().deleteFile(sock) catch {};
+                startManager(alloc, dir, workspace, sock) catch |start_err| switch (start_err) {
+                    error.ManagerExists => {},
+                    else => return start_err,
+                };
+                continue;
+            },
+            else => return err,
+        };
+    }
+}
+
+fn runViewer(alloc: std.mem.Allocator, sock_path: []const u8) !Outcome {
     const tty: posix.fd_t = 0;
     if (!posix.isatty(tty)) return error.NotATty;
 
-    var ui: Ui = .{ .alloc = alloc, .dir = dir, .workspace = workspace, .tty = tty };
-    defer ui.deinit();
+    const sock = try client.connect(alloc, sock_path);
+    defer posix.close(sock);
 
     // Signal plumbing mirrors client.attach: WINCH relayouts,
-    // TERM/HUP quit cleanly.
+    // TERM/HUP drop only this viewer; the manager keeps running.
     const pipe_fds = try posix.pipe2(.{ .CLOEXEC = true, .NONBLOCK = true });
     defer posix.close(pipe_fds[0]);
     defer posix.close(pipe_fds[1]);
@@ -1029,19 +1058,199 @@ pub fn run(alloc: std.mem.Allocator, dir: []const u8, workspace: ?[]const u8) !v
     // mode switch. The drain absorbs a still-held quit key, whose
     // repeats would otherwise reach the shell; a C-d tail gets the
     // longer EOF guard.
-    defer client.restoreTty(tty, saved, restore_sequence, ui.eof_guard);
+    var eof_guard = false;
+    defer client.restoreTty(tty, saved, restore_sequence, eof_guard);
     try protocol.writeAll(1, enter_sequence);
 
     const ws = ptypkg.getSize(tty) catch ptypkg.makeWinsize(24, 80);
-    ui.layout = .init(ws.row, ws.col);
-    // Running inside a moo session: never attach the session hosting
-    // this UI, or its output would feed back into itself forever.
-    ui.host_name = posix.getenv("MOO");
+    var attach_payload: std.ArrayList(u8) = .empty;
+    defer attach_payload.deinit(alloc);
+    try attach_payload.appendSlice(alloc, &(protocol.SizePayload{
+        .rows = ws.row,
+        .cols = ws.col,
+    }).encode());
+    if (posix.getenv("MOO")) |host| try attach_payload.appendSlice(alloc, host);
+    protocol.writeMsg(sock, .attach, attach_payload.items) catch return error.ConnectionLost;
 
-    try ui.refreshSessions();
+    var decoder: protocol.Decoder = .init(alloc);
+    defer decoder.deinit();
+
+    var buf: [32 * 1024]u8 = undefined;
+    var saw_hello = false;
+    const handshake_deadline = std.time.milliTimestamp() + manager_handshake_timeout_ms;
+    while (true) {
+        if (!saw_hello and std.time.milliTimestamp() >= handshake_deadline) {
+            return error.ConnectionLost;
+        }
+        var fds = [_]posix.pollfd{
+            .{ .fd = if (saw_hello) tty else -1, .events = posix.POLL.IN, .revents = 0 },
+            .{ .fd = sock, .events = posix.POLL.IN, .revents = 0 },
+            .{ .fd = pipe_fds[0], .events = posix.POLL.IN, .revents = 0 },
+        };
+        const timeout: i32 = if (saw_hello)
+            -1
+        else
+            @intCast(std.math.clamp(handshake_deadline - std.time.milliTimestamp(), 0, manager_handshake_timeout_ms));
+        const ready = try posix.poll(&fds, timeout);
+        if (ready == 0 and !saw_hello) return error.ConnectionLost;
+        if (!saw_hello and std.time.milliTimestamp() >= handshake_deadline) {
+            return error.ConnectionLost;
+        }
+
+        if (fds[2].revents != 0) {
+            while (true) {
+                const n = posix.read(pipe_fds[0], &buf) catch 0;
+                if (n == 0) break;
+                for (buf[0..n]) |sig| switch (sig) {
+                    posix.SIG.WINCH => {
+                        const new_ws = ptypkg.getSize(tty) catch continue;
+                        protocol.writeMsg(sock, .resize, &(protocol.SizePayload{
+                            .rows = new_ws.row,
+                            .cols = new_ws.col,
+                        }).encode()) catch return .lost;
+                    },
+                    else => return .lost,
+                };
+                if (n < buf.len) break;
+            }
+        }
+
+        if (fds[0].revents != 0) {
+            const n = posix.read(tty, &buf) catch 0;
+            if (n == 0) return .lost;
+            protocol.writeMsg(sock, .input, buf[0..n]) catch return .lost;
+        }
+
+        if (fds[1].revents != 0) {
+            const n = posix.read(sock, &buf) catch 0;
+            if (n == 0) return if (saw_hello) .lost else error.ConnectionLost;
+            decoder.feed(buf[0..n]) catch return error.BadResponse;
+            while (decoder.next() catch return error.BadResponse) |msg| {
+                if (!saw_hello) {
+                    if (msg.type != .ok) return error.BadResponse;
+                    saw_hello = true;
+                    continue;
+                }
+                switch (msg.type) {
+                    .ok => {},
+                    .output => try protocol.writeAll(1, msg.payload),
+                    .detached => {
+                        if (std.mem.eql(u8, msg.payload, "stolen")) return .stolen;
+                        eof_guard = std.mem.eql(u8, msg.payload, "closed-eof");
+                        return .closed;
+                    },
+                    .err => return error.BadResponse,
+                    else => if (!saw_hello) return error.BadResponse,
+                }
+            }
+        }
+    }
+}
+
+fn startManager(
+    alloc: std.mem.Allocator,
+    dir: []const u8,
+    workspace: ?[]const u8,
+    sock_path: []const u8,
+) !void {
+    const listen_fd = try bindManager(alloc, sock_path);
+    errdefer posix.close(listen_fd);
+
+    const pid = try posix.fork();
+    if (pid == 0) {
+        runManagerChild(alloc, dir, workspace, sock_path, listen_fd);
+    }
+    posix.close(listen_fd);
+}
+
+fn bindManager(alloc: std.mem.Allocator, sock_path: []const u8) !posix.fd_t {
+    const fd = try posix.socket(posix.AF.UNIX, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0);
+    errdefer posix.close(fd);
+    var addr: posix.sockaddr.un = .{ .family = posix.AF.UNIX, .path = undefined };
+    if (sock_path.len >= addr.path.len) return error.NameTooLong;
+    @memset(&addr.path, 0);
+    @memcpy(addr.path[0..sock_path.len], sock_path);
+
+    posix.bind(fd, @ptrCast(&addr), @sizeOf(posix.sockaddr.un)) catch |err| switch (err) {
+        error.AddressInUse => {
+            if (client.connect(alloc, sock_path)) |probe| {
+                posix.close(probe);
+                return error.ManagerExists;
+            } else |_| {}
+            try std.fs.cwd().deleteFile(sock_path);
+            try posix.bind(fd, @ptrCast(&addr), @sizeOf(posix.sockaddr.un));
+        },
+        else => return err,
+    };
+    try posix.listen(fd, 8);
+    return fd;
+}
+
+fn runManagerChild(
+    alloc: std.mem.Allocator,
+    dir: []const u8,
+    workspace: ?[]const u8,
+    sock_path: []const u8,
+    listen_fd: posix.fd_t,
+) noreturn {
+    _ = posix.setsid() catch {};
+
+    const devnull = posix.open("/dev/null", .{ .ACCMODE = .RDWR }, 0) catch posix.exit(1);
+    posix.dup2(devnull, 0) catch {};
+    posix.dup2(devnull, 1) catch {};
+    if (posix.getenv("MOO_LOG")) |log_path| blk: {
+        const fd = posix.open(log_path, .{
+            .ACCMODE = .WRONLY,
+            .CREAT = true,
+            .APPEND = true,
+        }, 0o600) catch break :blk;
+        posix.dup2(fd, 2) catch {};
+        posix.close(fd);
+    } else {
+        posix.dup2(devnull, 2) catch {};
+    }
+    if (devnull > 2) posix.close(devnull);
+
+    posix.sigaction(posix.SIG.PIPE, &.{
+        .handler = .{ .handler = posix.SIG.IGN },
+        .mask = posix.sigemptyset(),
+        .flags = 0,
+    }, null);
+    posix.sigaction(posix.SIG.HUP, &.{
+        .handler = .{ .handler = posix.SIG.IGN },
+        .mask = posix.sigemptyset(),
+        .flags = 0,
+    }, null);
+    posix.sigaction(posix.SIG.TERM, &.{
+        .handler = .{ .handler = posix.SIG.DFL },
+        .mask = posix.sigemptyset(),
+        .flags = 0,
+    }, null);
+
+    var ui: Ui = .{
+        .alloc = alloc,
+        .dir = dir,
+        .workspace = workspace,
+        .listen_fd = listen_fd,
+        .socket_path = sock_path,
+        .born_ms = std.time.milliTimestamp(),
+    };
+    ui.manager_id = std.fmt.allocPrint(alloc, "{d}", .{std.c.getpid()}) catch null;
+    if (ui.manager_id) |id| {
+        if (paths.uiManagerIdPath(alloc, dir)) |id_path| {
+            defer alloc.free(id_path);
+            std.fs.cwd().writeFile(.{ .sub_path = id_path, .data = id }) catch {};
+        } else |_| {}
+    }
+    ui.refreshSessions() catch {};
     if (ui.selected == null) ui.selectInitial();
 
-    try ui.loop(pipe_fds[0]);
+    ui.loop() catch |err| {
+        std.log.err("ui manager failed: {}", .{err});
+        posix.exit(1);
+    };
+    ui.deinit();
+    posix.exit(0);
 }
 
 /// Cached serialization of one viewport (terminal) row, keyed on the
@@ -1082,7 +1291,14 @@ const Ui = struct {
     alloc: std.mem.Allocator,
     dir: []const u8,
     workspace: ?[]const u8,
-    tty: posix.fd_t,
+    listen_fd: posix.fd_t = -1,
+    socket_path: ?[]const u8 = null,
+    manager_id: ?[]u8 = null,
+    viewer: ?Viewer = null,
+    pending_viewer: ?Viewer = null,
+    born_ms: i64 = 0,
+    had_viewer: bool = false,
+    tty: posix.fd_t = -1,
 
     layout: Layout = .{ .rows = 24, .cols = 80, .sidebar_w = 24 },
     sessions: std.ArrayList(Entry) = .empty,
@@ -1090,6 +1306,7 @@ const Ui = struct {
     selected: ?usize = null,
     /// The session this UI itself runs inside, when nested in moo.
     host_name: ?[]const u8 = null,
+    host_name_owned: ?[]u8 = null,
     /// Name of the previously focused session for C-a C-a toggling.
     last_name: ?[]u8 = null,
     /// Session name the current view is attached to; outlives a
@@ -1172,8 +1389,25 @@ const Ui = struct {
     eof_guard: bool = false,
 
     const CellPos = struct { x: u16, y: u16 };
+    const Viewer = struct {
+        fd: posix.fd_t,
+        decoder: protocol.Decoder,
+    };
 
     fn deinit(self: *Ui) void {
+        self.dropPendingViewer();
+        self.dropViewer();
+        if (self.listen_fd >= 0) {
+            posix.close(self.listen_fd);
+            self.listen_fd = -1;
+        }
+        if (self.socket_path) |p| std.fs.cwd().deleteFile(p) catch {};
+        if (self.manager_id) |id| self.alloc.free(id);
+        if (self.host_name_owned) |n| self.alloc.free(n);
+        if (paths.uiManagerIdPath(self.alloc, self.dir)) |id_path| {
+            defer self.alloc.free(id_path);
+            std.fs.cwd().deleteFile(id_path) catch {};
+        } else |_| {}
         if (self.view) |v| v.destroy();
         freeEntries(self.alloc, &self.sessions);
         if (self.last_name) |n| self.alloc.free(n);
@@ -1189,28 +1423,166 @@ const Ui = struct {
 
     // -- Main loop ---------------------------------------------------------
 
-    fn loop(self: *Ui, sig_read: posix.fd_t) !void {
+    fn acceptViewer(self: *Ui) void {
+        const fd = posix.accept(self.listen_fd, null, null, posix.SOCK.CLOEXEC) catch |err| {
+            log.warn("ui viewer accept failed: {}", .{err});
+            return;
+        };
+        self.dropPendingViewer();
+        self.pending_viewer = .{ .fd = fd, .decoder = .init(self.alloc) };
+    }
+
+    const ViewerAttach = struct {
+        size: protocol.SizePayload,
+        host: []const u8,
+    };
+
+    fn decodeViewerAttach(payload: []const u8) error{InvalidPayload}!ViewerAttach {
+        if (payload.len < 4) return error.InvalidPayload;
+        return .{
+            .size = .{
+                .rows = std.mem.readInt(u16, payload[0..2], .little),
+                .cols = std.mem.readInt(u16, payload[2..4], .little),
+            },
+            .host = payload[4..],
+        };
+    }
+
+    fn promotePendingViewer(self: *Ui, attach: ViewerAttach) void {
+        const pending = self.pending_viewer orelse return;
+        self.pending_viewer = null;
+        if (self.viewer) |old| {
+            protocol.writeMsg(old.fd, .detached, "stolen") catch {};
+            self.dropViewer();
+        }
+        self.viewer = pending;
+        self.had_viewer = true;
+        // Per-terminal mirrors and held input bytes cannot safely cross
+        // viewer connections.
+        self.parser = .{};
+        self.esc_deadline = 0;
+        self.kitty_flags = 0;
+        self.modify_keys = false;
+        self.mouse_pressed = false;
+        self.mouse_last_cell = null;
+        self.select_anchor = null;
+        self.setViewerHost(attach.host);
+        self.attachViewer(attach.size);
+    }
+
+    fn setViewerHost(self: *Ui, host: []const u8) void {
+        if (self.host_name_owned) |n| self.alloc.free(n);
+        self.host_name_owned = null;
+        self.host_name = null;
+        if (host.len > 0) {
+            self.host_name_owned = self.alloc.dupe(u8, host) catch null;
+            self.host_name = self.host_name_owned;
+        }
+
+        if (self.view_name) |view_name| {
+            if (self.host_name) |h| {
+                if (std.mem.eql(u8, view_name, h)) {
+                    if (self.view) |v| v.destroy();
+                    self.view = null;
+                    self.alloc.free(view_name);
+                    self.view_name = null;
+                    self.selected = null;
+                }
+            }
+        }
+        if (self.selected) |idx| {
+            if (idx < self.sessions.items.len and self.isHost(idx)) {
+                self.selected = null;
+            }
+        }
+        self.refreshSessions() catch {};
+        if (self.selected == null) self.selectInitial();
+    }
+
+    fn attachViewer(self: *Ui, size: protocol.SizePayload) void {
+        self.relayout(size);
+        if (self.manager_id) |id| {
+            self.sendViewer(.ok, id);
+        } else {
+            self.sendViewer(.ok, "");
+        }
+        // The new terminal has an empty screen and unknown mode mirror.
+        self.full_render = true;
+        self.need_render = true;
+        self.row_cache.clearRetainingCapacity();
+        for (self.viewport_cache.items) |*row| row.valid = false;
+        if (self.sessions.items.len == 0) {
+            self.refreshSessions() catch {};
+        }
+        if (self.selected == null) self.selectInitial();
+        if (self.view == null) {
+            if (self.selected) |idx| {
+                if (idx < self.sessions.items.len and !self.sessions.items[idx].attached) {
+                    self.attachSelected();
+                }
+            }
+        }
+        self.syncKeyboard();
+    }
+
+    fn dropViewer(self: *Ui) void {
+        var viewer = self.viewer orelse return;
+        self.viewer = null;
+        posix.close(viewer.fd);
+        viewer.decoder.deinit();
+        self.parser = .{};
+        self.esc_deadline = 0;
+        self.kitty_flags = 0;
+        self.modify_keys = false;
+        self.mouse_pressed = false;
+        self.mouse_last_cell = null;
+        self.select_anchor = null;
+    }
+
+    fn dropPendingViewer(self: *Ui) void {
+        var viewer = self.pending_viewer orelse return;
+        self.pending_viewer = null;
+        posix.close(viewer.fd);
+        viewer.decoder.deinit();
+    }
+
+    fn sendViewer(self: *Ui, msg_type: protocol.MsgType, payload: []const u8) void {
+        if (self.viewer) |viewer| {
+            protocol.writeMsg(viewer.fd, msg_type, payload) catch self.dropViewer();
+        }
+    }
+
+    fn writeViewer(self: *Ui, bytes: []const u8) void {
+        if (bytes.len == 0) return;
+        self.sendViewer(.output, bytes);
+    }
+
+    fn loop(self: *Ui) !void {
         var buf: [32 * 1024]u8 = undefined;
 
         while (!self.quitting) {
             try self.renderIfNeeded();
 
             var fds = [_]posix.pollfd{
-                .{ .fd = self.tty, .events = posix.POLL.IN, .revents = 0 },
-                .{ .fd = sig_read, .events = posix.POLL.IN, .revents = 0 },
+                .{ .fd = self.listen_fd, .events = posix.POLL.IN, .revents = 0 },
+                .{ .fd = if (self.viewer) |v| v.fd else -1, .events = posix.POLL.IN, .revents = 0 },
+                .{ .fd = if (self.pending_viewer) |v| v.fd else -1, .events = posix.POLL.IN, .revents = 0 },
                 .{ .fd = -1, .events = posix.POLL.IN, .revents = 0 },
             };
             // Only a live view's socket is polled: a dead one stays
             // readable (EOF) forever and would spin the loop.
-            if (self.liveView()) |v| fds[2].fd = v.sock;
+            if (self.liveView()) |v| fds[3].fd = v.sock;
             const polled_gen = self.view_gen;
 
             _ = try posix.poll(&fds, self.pollTimeout());
 
-            if (fds[1].revents != 0) self.drainSignals(sig_read, &buf);
+            const accepted_viewer = fds[0].revents != 0;
+            if (accepted_viewer) self.acceptViewer();
             if (self.quitting) break;
 
-            if (fds[0].revents != 0) try self.readTty(&buf);
+            if (fds[1].revents != 0) try self.readViewer(&buf);
+            if (self.quitting) break;
+            if (!accepted_viewer and fds[2].revents != 0) try self.readPendingViewer(&buf);
             if (self.quitting) break;
             try self.flushPendingEsc();
             // Input may have opened or closed a prompt; re-sync the
@@ -1222,7 +1594,7 @@ const Ui = struct {
             // Input handling may have switched the focused session;
             // the poll result then describes the old socket, and
             // reading the new (still quiet) one would block the UI.
-            if (fds[2].revents != 0 and self.view_gen == polled_gen) {
+            if (fds[3].revents != 0 and self.view_gen == polled_gen) {
                 try self.readView(&buf);
             }
 
@@ -1240,7 +1612,7 @@ const Ui = struct {
             if (self.view) |v| {
                 if (v.bell) {
                     v.bell = false;
-                    protocol.writeAll(1, "\x07") catch {};
+                    self.writeViewer("\x07");
                 }
                 // Last: refreshSessions can destroy the view, so `v`
                 // must not be touched after it runs.
@@ -1250,6 +1622,11 @@ const Ui = struct {
                 }
             }
             self.syncKeyboard();
+            if (self.viewer == null and self.pending_viewer == null and self.sessions.items.len == 0) {
+                if (self.had_viewer or now - self.born_ms >= manager_startup_idle_ms) {
+                    self.quitting = true;
+                }
+            }
         }
     }
 
@@ -1268,22 +1645,9 @@ const Ui = struct {
         return @intCast(std.math.clamp(deadline - now, 0, 1000));
     }
 
-    fn drainSignals(self: *Ui, sig_read: posix.fd_t, buf: []u8) void {
-        while (true) {
-            const n = posix.read(sig_read, buf) catch 0;
-            if (n == 0) break;
-            for (buf[0..n]) |sig| switch (sig) {
-                posix.SIG.WINCH => self.relayout(),
-                else => self.quitting = true,
-            };
-            if (n < buf.len) break;
-        }
-    }
-
-    fn relayout(self: *Ui) void {
-        const ws = ptypkg.getSize(self.tty) catch return;
+    fn relayout(self: *Ui, ws: protocol.SizePayload) void {
         const hidden = self.layout.hidden;
-        self.layout = .init(ws.row, ws.col);
+        self.layout = .init(ws.rows, ws.cols);
         self.layout.hidden = hidden;
         if (self.sidebar_pref) |w| {
             self.layout.sidebar_w = self.clampSidebarWidth(w);
@@ -1293,12 +1657,84 @@ const Ui = struct {
 
     // -- Terminal input ------------------------------------------------------
 
-    fn readTty(self: *Ui, buf: []u8) !void {
-        const n = posix.read(self.tty, buf) catch 0;
+    fn readPendingViewer(self: *Ui, buf: []u8) !void {
+        const pending = if (self.pending_viewer) |*v| v else return;
+        const n = posix.read(pending.fd, buf) catch 0;
         if (n == 0) {
-            self.quitting = true;
+            self.dropPendingViewer();
             return;
         }
+        pending.decoder.feed(buf[0..n]) catch {
+            self.dropPendingViewer();
+            return;
+        };
+        while (pending.decoder.next() catch {
+            self.dropPendingViewer();
+            return;
+        }) |msg| {
+            switch (msg.type) {
+                .attach => {
+                    const attach = decodeViewerAttach(msg.payload) catch {
+                        self.dropPendingViewer();
+                        return;
+                    };
+                    self.promotePendingViewer(attach);
+                    try self.drainViewerMessages();
+                    return;
+                },
+                else => {
+                    self.dropPendingViewer();
+                    return;
+                },
+            }
+        }
+    }
+
+    fn readViewer(self: *Ui, buf: []u8) !void {
+        const viewer = if (self.viewer) |*v| v else return;
+        const n = posix.read(viewer.fd, buf) catch 0;
+        if (n == 0) {
+            self.dropViewer();
+            return;
+        }
+        viewer.decoder.feed(buf[0..n]) catch {
+            self.dropViewer();
+            return;
+        };
+        try self.drainViewerMessages();
+    }
+
+    fn drainViewerMessages(self: *Ui) !void {
+        while (self.viewer) |*viewer| {
+            const msg = viewer.decoder.next() catch {
+                self.dropViewer();
+                return;
+            } orelse return;
+            try self.handleViewerMsg(msg);
+            if (self.viewer == null or self.quitting) return;
+        }
+    }
+
+    fn handleViewerMsg(self: *Ui, msg: protocol.Msg) !void {
+        switch (msg.type) {
+            .attach => {
+                const attach = decodeViewerAttach(msg.payload) catch {
+                    self.dropViewer();
+                    return;
+                };
+                self.setViewerHost(attach.host);
+                self.attachViewer(attach.size);
+            },
+            .resize => {
+                const size = protocol.SizePayload.decode(msg.payload) catch return;
+                self.relayout(size);
+            },
+            .input => try self.handleInputBytes(msg.payload),
+            else => {},
+        }
+    }
+
+    fn handleInputBytes(self: *Ui, bytes: []const u8) !void {
         const Handler = struct {
             ui: *Ui,
             pub fn event(h: @This(), ev: InputEvent) !void {
@@ -1308,7 +1744,7 @@ const Ui = struct {
         // The status bar shows the keybind list while the prefix is
         // armed, so arming and disarming both need a repaint.
         const was_pending = self.parser.pending_prefix;
-        try self.parser.feed(buf[0..n], .{
+        try self.parser.feed(bytes, .{
             .kitty = self.kitty_flags != 0,
             .modify = self.modify_keys,
         }, Handler{ .ui = self });
@@ -1355,6 +1791,11 @@ const Ui = struct {
     /// The parser decodes the prefix and command keys in both
     /// encodings, so C-a keeps working while either is mirrored.
     fn syncKeyboard(self: *Ui) void {
+        if (self.viewer == null) {
+            self.kitty_flags = 0;
+            self.modify_keys = false;
+            return;
+        }
         var kitty: u5 = 0;
         var modify = false;
         if (!self.uiOwnsKeyboard()) {
@@ -1367,12 +1808,12 @@ const Ui = struct {
             self.kitty_flags = kitty;
             var buf: [12]u8 = undefined;
             const seq = std.fmt.bufPrint(&buf, "\x1b[={d};1u", .{kitty}) catch unreachable;
-            protocol.writeAll(1, seq) catch {};
+            self.writeViewer(seq);
         }
         if (modify != self.modify_keys) {
             self.modify_keys = modify;
             const seq: []const u8 = if (modify) "\x1b[>4;2m" else "\x1b[>4;0m";
-            protocol.writeAll(1, seq) catch {};
+            self.writeViewer(seq);
         }
     }
 
@@ -1610,6 +2051,7 @@ const Ui = struct {
                 // terminal is handed back; use the long restore drain,
                 // like a detach from a plain attach.
                 self.eof_guard = true;
+                self.sendViewer(.detached, "closed-eof");
                 self.quitting = true;
             },
             'n', 0x0e => self.focusOffset(1),
@@ -1899,7 +2341,7 @@ const Ui = struct {
         const b64 = seq.addManyAsSlice(alloc, encoder.calcSize(text.len)) catch return;
         _ = encoder.encode(b64, text);
         seq.appendSlice(alloc, "\x07") catch return;
-        protocol.writeAll(1, seq.items) catch {};
+        self.writeViewer(seq.items);
 
         self.setMessage("copied {d} characters", .{text.len});
     }
@@ -2642,7 +3084,7 @@ const Ui = struct {
         defer frame.deinit(self.alloc);
         try self.composeFrame(&frame);
         self.full_render = false;
-        if (frame.items.len > 0) try protocol.writeAll(1, frame.items);
+        if (frame.items.len > 0) self.writeViewer(frame.items);
     }
 
     /// Build the bytes for one repaint: changed rows only, wrapped in

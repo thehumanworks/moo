@@ -353,7 +353,7 @@ const PtyClient = struct {
             var status: c_int = undefined;
             _ = std.c.waitpid(self.pid, &status, 0);
         }
-        posix.close(self.master);
+        if (self.master >= 0) posix.close(self.master);
         self.output.deinit(self.alloc);
     }
 
@@ -434,6 +434,37 @@ const PtyClient = struct {
             _ = self.pump(0) catch {};
             try deadline.tick("waiting for client exit");
         }
+    }
+
+    fn waitExitNoPump(self: *PtyClient) !u32 {
+        if (self.exited) |code| return code;
+        var deadline = Deadline.init(default_timeout_ms);
+        while (true) {
+            var status: c_int = undefined;
+            const r = std.c.waitpid(self.pid, &status, std.c.W.NOHANG);
+            if (r == self.pid) {
+                const code: u32 = if (std.c.W.IFEXITED(@bitCast(status)))
+                    std.c.W.EXITSTATUS(@bitCast(status))
+                else
+                    128;
+                self.exited = code;
+                return code;
+            }
+            try deadline.tick("waiting for client exit");
+        }
+    }
+
+    fn closePtyAndWaitExit(self: *PtyClient) !u32 {
+        if (self.master >= 0) {
+            posix.close(self.master);
+            self.master = -1;
+        }
+        return self.waitExitNoPump();
+    }
+
+    fn signalAndWaitExit(self: *PtyClient, sig: c_int) !u32 {
+        _ = kill(self.pid, sig);
+        return self.waitExit();
     }
 };
 
@@ -1465,6 +1496,145 @@ fn lsHasSession(h: *Harness, ls_args: []const []const u8, name: []const u8) !boo
     return false;
 }
 
+fn lsSessionAttached(h: *Harness, ls_args: []const []const u8, name: []const u8) !bool {
+    var argv: std.ArrayList([]const u8) = .empty;
+    defer argv.deinit(h.alloc);
+    try argv.append(h.alloc, "ls");
+    try argv.appendSlice(h.alloc, ls_args);
+    try argv.append(h.alloc, "--json");
+    const result = try h.run(argv.items);
+    defer h.alloc.free(result.stdout);
+    defer h.alloc.free(result.stderr);
+    if (result.term != .Exited or result.term.Exited != 0) return error.LsFailed;
+    var parsed = try std.json.parseFromSlice(std.json.Value, h.alloc, result.stdout, .{});
+    defer parsed.deinit();
+    for (parsed.value.array.items) |entry| {
+        if (std.mem.eql(u8, entry.object.get("name").?.string, name)) {
+            return entry.object.get("attached").?.bool;
+        }
+    }
+    return error.NoSuchSession;
+}
+
+fn uiManagerIdPath(alloc: std.mem.Allocator, h: *Harness, workspace: ?[]const u8) ![]u8 {
+    if (workspace) |ws| {
+        return std.fs.path.join(alloc, &.{ h.dir, "ws", ws, ".moo-ui.id" });
+    }
+    return std.fs.path.join(alloc, &.{ h.dir, ".moo-ui.id" });
+}
+
+fn uiManagerSocketPath(alloc: std.mem.Allocator, h: *Harness, workspace: ?[]const u8) ![]u8 {
+    if (workspace) |ws| {
+        return std.fs.path.join(alloc, &.{ h.dir, "ws", ws, ".moo-ui.sock" });
+    }
+    return std.fs.path.join(alloc, &.{ h.dir, ".moo-ui.sock" });
+}
+
+fn readUiManagerId(alloc: std.mem.Allocator, h: *Harness, workspace: ?[]const u8) ![]u8 {
+    const path = try uiManagerIdPath(alloc, h, workspace);
+    defer alloc.free(path);
+    var deadline = Deadline.init(default_timeout_ms);
+    while (true) {
+        if (std.fs.cwd().readFileAlloc(alloc, path, 4096)) |bytes| {
+            return bytes;
+        } else |_| {}
+        try deadline.tick("ui manager id never appeared");
+    }
+}
+
+fn unixListen(path: []const u8) !posix.fd_t {
+    const fd = try posix.socket(posix.AF.UNIX, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0);
+    errdefer posix.close(fd);
+    var addr: posix.sockaddr.un = .{ .family = posix.AF.UNIX, .path = undefined };
+    if (path.len >= addr.path.len) return error.NameTooLong;
+    @memset(&addr.path, 0);
+    @memcpy(addr.path[0..path.len], path);
+    try posix.bind(fd, @ptrCast(&addr), @sizeOf(posix.sockaddr.un));
+    try posix.listen(fd, 1);
+    return fd;
+}
+
+fn unixConnect(path: []const u8) !posix.fd_t {
+    const fd = try posix.socket(posix.AF.UNIX, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0);
+    errdefer posix.close(fd);
+    var addr: posix.sockaddr.un = .{ .family = posix.AF.UNIX, .path = undefined };
+    if (path.len >= addr.path.len) return error.NameTooLong;
+    @memset(&addr.path, 0);
+    @memcpy(addr.path[0..path.len], path);
+    try posix.connect(fd, @ptrCast(&addr), @sizeOf(posix.sockaddr.un));
+    return fd;
+}
+
+fn makeDeadUiManagerSocket(path: []const u8) !void {
+    const fd = try unixListen(path);
+    posix.close(fd);
+}
+
+const FakeUiManagerMode = enum { eof, malformed, silent };
+
+fn writeOutputFrame(fd: posix.fd_t, payload: []const u8) !void {
+    var header: [5]u8 = undefined;
+    header[0] = 64; // protocol.MsgType.output
+    std.mem.writeInt(u32, header[1..5], @intCast(payload.len), .little);
+    try writeAllFd(fd, &header);
+    try writeAllFd(fd, payload);
+}
+
+fn appendFrame(alloc: std.mem.Allocator, frame: *std.ArrayList(u8), msg_type: u8, payload: []const u8) !void {
+    var header: [5]u8 = undefined;
+    header[0] = msg_type;
+    std.mem.writeInt(u32, header[1..5], @intCast(payload.len), .little);
+    try frame.appendSlice(alloc, &header);
+    try frame.appendSlice(alloc, payload);
+}
+
+fn writeAllFd(fd: posix.fd_t, bytes: []const u8) !void {
+    var i: usize = 0;
+    while (i < bytes.len) i += try posix.write(fd, bytes[i..]);
+}
+
+fn startFakeUiManager(path: []const u8, mode: FakeUiManagerMode) !std.c.pid_t {
+    const listen_fd = try unixListen(path);
+    errdefer posix.close(listen_fd);
+    const pid = try posix.fork();
+    if (pid == 0) {
+        const fd = posix.accept(listen_fd, null, null, posix.SOCK.CLOEXEC) catch posix.exit(1);
+        posix.close(listen_fd);
+        switch (mode) {
+            .eof => {},
+            .malformed => writeOutputFrame(fd, "not a manager hello") catch {},
+            .silent => std.Thread.sleep(30 * std.time.ns_per_s),
+        }
+        posix.close(fd);
+        posix.exit(0);
+    }
+    posix.close(listen_fd);
+    return pid;
+}
+
+fn waitPid(pid: std.c.pid_t) void {
+    var status: c_int = undefined;
+    _ = std.c.waitpid(pid, &status, 0);
+}
+
+fn waitProcessGone(pid: std.c.pid_t) !void {
+    var deadline = Deadline.init(default_timeout_ms);
+    while (true) {
+        if (kill(pid, 0) != 0) return;
+        try deadline.tick("process still exists");
+    }
+}
+
+fn waitUiManagerGone(alloc: std.mem.Allocator, h: *Harness, workspace: ?[]const u8) !void {
+    const path = try uiManagerIdPath(alloc, h, workspace);
+    defer alloc.free(path);
+    var deadline = Deadline.init(default_timeout_ms);
+    while (true) {
+        std.fs.cwd().access(path, .{}) catch return;
+        try deadline.tick("ui manager id still exists");
+    }
+}
+
 /// Start a detached session inside a workspace and wait for it to be live.
 /// Mirrors Harness.startDetached but threads `-w <workspace>` through every
 /// command, since the session is only visible within that workspace's dir.
@@ -1879,6 +2049,94 @@ fn expectScopedUiCreateInWorkspace(
     try ui.waitFor(created);
 }
 
+const UiLoss = enum { close_pty, sighup };
+
+fn expectUiReconnectAfterLoss(h: *Harness, loss: UiLoss) !void {
+    const alloc = h.alloc;
+
+    try h.startDetached("alpha", &.{ "sh", "-c", "printf 'ALPHA-MARK\\n'; exec cat" });
+    try h.startDetached("bravo", &.{ "sh", "-c", "printf 'BRAVO-MARK\\n'; exec cat" });
+
+    var ui = try PtyClient.spawn(h, &.{"ui"}, 24, 100);
+    defer ui.deinit();
+    try ui.waitFor("BRAVO-MARK");
+    ui.clearOutput();
+    try ui.send("\x01p");
+    try ui.waitFor("ALPHA-MARK");
+
+    const id_before = try readUiManagerId(alloc, h, null);
+    defer alloc.free(id_before);
+
+    _ = switch (loss) {
+        .close_pty => try ui.closePtyAndWaitExit(),
+        .sighup => try ui.signalAndWaitExit(posix.SIG.HUP),
+    };
+
+    try std.testing.expect(try lsSessionAttached(h, &.{}, "alpha"));
+    try h.sendLine("alpha", "GAP-OUTPUT-MARK");
+
+    var resumed = try PtyClient.spawn(h, &.{"ui"}, 24, 100);
+    defer resumed.deinit();
+    try resumed.waitFor("ALPHA-MARK");
+    try resumed.waitFor("GAP-OUTPUT-MARK");
+
+    const id_after = try readUiManagerId(alloc, h, null);
+    defer alloc.free(id_after);
+    try std.testing.expectEqualStrings(id_before, id_after);
+
+    resumed.clearOutput();
+    try resumed.send("AFTER-RECONNECT\r");
+    try resumed.waitFor("AFTER-RECONNECT");
+
+    const alpha = try h.run(&.{ "peek", "alpha" });
+    defer alloc.free(alpha.stdout);
+    defer alloc.free(alpha.stderr);
+    try std.testing.expect(std.mem.indexOf(u8, alpha.stdout, "AFTER-RECONNECT") != null);
+
+    const bravo = try h.run(&.{ "peek", "bravo" });
+    defer alloc.free(bravo.stdout);
+    defer alloc.free(bravo.stderr);
+    try std.testing.expect(std.mem.indexOf(u8, bravo.stdout, "AFTER-RECONNECT") == null);
+
+    try resumed.send("\x01d");
+    try resumed.waitFor("[moo ui closed]");
+    try std.testing.expectEqual(@as(u32, 0), try resumed.waitExit());
+}
+
+const StaleUiManager = enum { refused, eof, malformed, silent };
+
+fn expectStaleUiManagerRecovery(h: *Harness, stale: StaleUiManager) !void {
+    const alloc = h.alloc;
+    try h.startDetached("keep", &.{ "sh", "-c", "printf 'KEEP-MARK\\n'; exec cat" });
+
+    const sock = try uiManagerSocketPath(alloc, h, null);
+    defer alloc.free(sock);
+    const fake_pid: ?std.c.pid_t = switch (stale) {
+        .refused => blk: {
+            try makeDeadUiManagerSocket(sock);
+            break :blk null;
+        },
+        .eof => try startFakeUiManager(sock, .eof),
+        .malformed => try startFakeUiManager(sock, .malformed),
+        .silent => try startFakeUiManager(sock, .silent),
+    };
+    defer if (fake_pid) |pid| {
+        _ = kill(pid, posix.SIG.TERM);
+        waitPid(pid);
+    };
+
+    var ui = try PtyClient.spawn(h, &.{"ui"}, 24, 100);
+    defer ui.deinit();
+    try ui.waitFor("KEEP-MARK");
+    try std.testing.expect(std.mem.indexOf(u8, ui.output.items, "not a manager hello") == null);
+    try std.testing.expect(try lsHasSession(h, &.{}, "keep"));
+    try std.testing.expect(try lsSessionAttached(h, &.{}, "keep"));
+
+    try ui.send("\x01d");
+    try ui.waitFor("[moo ui closed]");
+    try std.testing.expectEqual(@as(u32, 0), try ui.waitExit());
+}
+
 fn waitUiSessionCount(h: *Harness, want: usize) !void {
     var deadline = Deadline.init(default_timeout_ms);
     while (true) {
@@ -1934,6 +2192,316 @@ test "ui: sidebar lists sessions and the focused session renders in the viewport
     try ui.waitFor("AA-TYPED-MARK");
     const peeked = try h.waitPeekContains("aa", "AA-TYPED-MARK");
     defer alloc.free(peeked);
+}
+
+test "ui manager: PTY EOF reconnect resumes same non-default focus" {
+    const alloc = std.testing.allocator;
+    var h = try Harness.init(alloc);
+    defer h.deinit();
+
+    try expectUiReconnectAfterLoss(&h, .close_pty);
+}
+
+test "ui manager: SIGHUP reconnect resumes same non-default focus" {
+    const alloc = std.testing.allocator;
+    var h = try Harness.init(alloc);
+    defer h.deinit();
+
+    try expectUiReconnectAfterLoss(&h, .sighup);
+}
+
+test "ui manager: coalesced attach and input reaches focused session" {
+    const alloc = std.testing.allocator;
+    var h = try Harness.init(alloc);
+    defer h.deinit();
+
+    try h.startDetached("alpha", &.{ "sh", "-c", "printf 'ALPHA-MARK\\n'; exec cat" });
+    try h.startDetached("bravo", &.{ "sh", "-c", "printf 'BRAVO-MARK\\n'; exec cat" });
+
+    var ui = try PtyClient.spawn(&h, &.{"ui"}, 24, 100);
+    defer ui.deinit();
+    try ui.waitFor("BRAVO-MARK");
+    ui.clearOutput();
+    try ui.send("\x01p");
+    try ui.waitFor("ALPHA-MARK");
+    _ = try ui.signalAndWaitExit(posix.SIG.HUP);
+
+    const sock = try uiManagerSocketPath(alloc, &h, null);
+    defer alloc.free(sock);
+    const fd = try unixConnect(sock);
+    defer posix.close(fd);
+
+    var frames: std.ArrayList(u8) = .empty;
+    defer frames.deinit(alloc);
+    try appendFrame(alloc, &frames, 1, &[_]u8{ 24, 0, 100, 0 }); // attach rows=24 cols=100
+    try appendFrame(alloc, &frames, 2, "COALESCED-INPUT\r"); // input
+    try writeAllFd(fd, frames.items);
+
+    const alpha = try h.waitPeekContains("alpha", "COALESCED-INPUT");
+    defer alloc.free(alpha);
+    const bravo = try h.run(&.{ "peek", "bravo" });
+    defer alloc.free(bravo.stdout);
+    defer alloc.free(bravo.stderr);
+    try std.testing.expect(std.mem.indexOf(u8, bravo.stdout, "COALESCED-INPUT") == null);
+}
+
+test "ui manager: second viewer steals first and keeps focused session" {
+    const alloc = std.testing.allocator;
+    var h = try Harness.init(alloc);
+    defer h.deinit();
+
+    try h.startDetached("alpha", &.{ "sh", "-c", "printf 'ALPHA-MARK\\n'; exec cat" });
+    try h.startDetached("bravo", &.{ "sh", "-c", "printf 'BRAVO-MARK\\n'; exec cat" });
+
+    var first = try PtyClient.spawn(&h, &.{"ui"}, 24, 100);
+    defer first.deinit();
+    try first.waitFor("BRAVO-MARK");
+    first.clearOutput();
+    try first.send("\x01p");
+    try first.waitFor("ALPHA-MARK");
+
+    const id_before = try readUiManagerId(alloc, &h, null);
+    defer alloc.free(id_before);
+
+    var second = try PtyClient.spawn(&h, &.{"ui"}, 24, 100);
+    defer second.deinit();
+    try first.waitFor("[moo ui attached elsewhere]");
+    try std.testing.expectEqual(@as(u32, 0), try first.waitExit());
+    try second.waitFor("ALPHA-MARK");
+
+    const id_after = try readUiManagerId(alloc, &h, null);
+    defer alloc.free(id_after);
+    try std.testing.expectEqualStrings(id_before, id_after);
+    try std.testing.expect(try lsSessionAttached(&h, &.{}, "alpha"));
+
+    second.clearOutput();
+    try second.send("SECOND-VIEWER-MARK\r");
+    try second.waitFor("SECOND-VIEWER-MARK");
+
+    const alpha = try h.run(&.{ "peek", "alpha" });
+    defer alloc.free(alpha.stdout);
+    defer alloc.free(alpha.stderr);
+    try std.testing.expect(std.mem.indexOf(u8, alpha.stdout, "SECOND-VIEWER-MARK") != null);
+
+    try second.send("\x01d");
+    try second.waitFor("[moo ui closed]");
+    try std.testing.expectEqual(@as(u32, 0), try second.waitExit());
+}
+
+test "ui manager: workspace managers keep separate focus state" {
+    const alloc = std.testing.allocator;
+    var h = try Harness.init(alloc);
+    defer h.deinit();
+
+    try h.startDetached("alpha", &.{ "sh", "-c", "printf 'DEFAULT-ALPHA\\n'; exec cat" });
+    try h.startDetached("bravo", &.{ "sh", "-c", "printf 'DEFAULT-BRAVO\\n'; exec cat" });
+    try startDetachedWs(&h, "proj", "alpha", &.{ "sh", "-c", "printf 'PROJ-ALPHA\\n'; exec cat" });
+    try startDetachedWs(&h, "proj", "bravo", &.{ "sh", "-c", "printf 'PROJ-BRAVO\\n'; exec cat" });
+
+    var default_ui = try PtyClient.spawn(&h, &.{"ui"}, 24, 100);
+    defer default_ui.deinit();
+    try default_ui.waitFor("DEFAULT-BRAVO");
+    default_ui.clearOutput();
+    try default_ui.send("\x01p");
+    try default_ui.waitFor("DEFAULT-ALPHA");
+    const default_id = try readUiManagerId(alloc, &h, null);
+    defer alloc.free(default_id);
+    _ = try default_ui.signalAndWaitExit(posix.SIG.HUP);
+
+    var proj_ui = try PtyClient.spawn(&h, &.{ "ui", "-w", "proj" }, 24, 100);
+    defer proj_ui.deinit();
+    try proj_ui.waitFor("PROJ-BRAVO");
+    proj_ui.clearOutput();
+    try proj_ui.send("\x01p");
+    try proj_ui.waitFor("PROJ-ALPHA");
+    const proj_id = try readUiManagerId(alloc, &h, "proj");
+    defer alloc.free(proj_id);
+    try std.testing.expect(!std.mem.eql(u8, default_id, proj_id));
+    _ = try proj_ui.signalAndWaitExit(posix.SIG.HUP);
+
+    var default_resumed = try PtyClient.spawn(&h, &.{"ui"}, 24, 100);
+    defer default_resumed.deinit();
+    try default_resumed.waitFor("DEFAULT-ALPHA");
+    const default_id_after = try readUiManagerId(alloc, &h, null);
+    defer alloc.free(default_id_after);
+    try std.testing.expectEqualStrings(default_id, default_id_after);
+
+    const env = [_][2][]const u8{.{ "MOO_WORKSPACE", "proj" }};
+    var proj_resumed = try PtyClient.spawnWithEnv(&h, &.{"ui"}, 24, 100, &env);
+    defer proj_resumed.deinit();
+    try proj_resumed.waitFor("PROJ-ALPHA");
+    const proj_id_after = try readUiManagerId(alloc, &h, "proj");
+    defer alloc.free(proj_id_after);
+    try std.testing.expectEqualStrings(proj_id, proj_id_after);
+
+    try default_resumed.send("\x01d");
+    try default_resumed.waitFor("[moo ui closed]");
+    try std.testing.expectEqual(@as(u32, 0), try default_resumed.waitExit());
+
+    try proj_resumed.send("\x01d");
+    try proj_resumed.waitFor("[moo ui closed]");
+    try std.testing.expectEqual(@as(u32, 0), try proj_resumed.waitExit());
+}
+
+test "ui manager: exits after last session and viewer are gone" {
+    const alloc = std.testing.allocator;
+    var h = try Harness.init(alloc);
+    defer h.deinit();
+
+    try h.startDetached("solo", &.{"cat"});
+
+    var ui = try PtyClient.spawn(&h, &.{"ui"}, 24, 100);
+    defer ui.deinit();
+    try ui.waitFor("solo");
+
+    const id = try readUiManagerId(alloc, &h, null);
+    defer alloc.free(id);
+
+    try h.runOk(&.{ "kill", "--all" });
+    try ui.waitFor("no sessions");
+    _ = try ui.signalAndWaitExit(posix.SIG.HUP);
+    try waitUiManagerGone(alloc, &h, null);
+
+    var fresh = try PtyClient.spawn(&h, &.{"ui"}, 24, 100);
+    defer fresh.deinit();
+    try fresh.waitFor("no sessions");
+    const fresh_id = try readUiManagerId(alloc, &h, null);
+    defer alloc.free(fresh_id);
+    try std.testing.expect(!std.mem.eql(u8, id, fresh_id));
+
+    try fresh.send("\x01d");
+    try fresh.waitFor("[moo ui closed]");
+    try std.testing.expectEqual(@as(u32, 0), try fresh.waitExit());
+}
+
+test "ui manager: recovers from refused stale socket" {
+    const alloc = std.testing.allocator;
+    var h = try Harness.init(alloc);
+    defer h.deinit();
+
+    try expectStaleUiManagerRecovery(&h, .refused);
+}
+
+test "ui manager: recovers from EOF stale socket" {
+    const alloc = std.testing.allocator;
+    var h = try Harness.init(alloc);
+    defer h.deinit();
+
+    try expectStaleUiManagerRecovery(&h, .eof);
+}
+
+test "ui manager: recovers from malformed stale socket" {
+    const alloc = std.testing.allocator;
+    var h = try Harness.init(alloc);
+    defer h.deinit();
+
+    try expectStaleUiManagerRecovery(&h, .malformed);
+}
+
+test "ui manager: recovers from silent stale socket" {
+    const alloc = std.testing.allocator;
+    var h = try Harness.init(alloc);
+    defer h.deinit();
+
+    try expectStaleUiManagerRecovery(&h, .silent);
+}
+
+test "ui manager: stale recovery manager exits on SIGTERM and recovers again" {
+    const alloc = std.testing.allocator;
+    var h = try Harness.init(alloc);
+    defer h.deinit();
+
+    try h.startDetached("keep", &.{ "sh", "-c", "printf 'KEEP-MARK\\n'; exec cat" });
+
+    const sock = try uiManagerSocketPath(alloc, &h, null);
+    defer alloc.free(sock);
+    const fake_pid = try startFakeUiManager(sock, .eof);
+    defer {
+        _ = kill(fake_pid, posix.SIG.TERM);
+        waitPid(fake_pid);
+    }
+
+    var ui = try PtyClient.spawn(&h, &.{"ui"}, 24, 100);
+    defer ui.deinit();
+    try ui.waitFor("KEEP-MARK");
+
+    const id = try readUiManagerId(alloc, &h, null);
+    defer alloc.free(id);
+    const manager_pid = try std.fmt.parseInt(std.c.pid_t, id, 10);
+    _ = kill(manager_pid, posix.SIG.TERM);
+    try ui.waitFor("[lost connection to moo ui]");
+    try std.testing.expectEqual(@as(u32, 1), try ui.waitExit());
+    try waitProcessGone(manager_pid);
+
+    var recovered = try PtyClient.spawn(&h, &.{"ui"}, 24, 100);
+    defer recovered.deinit();
+    try recovered.waitFor("KEEP-MARK");
+
+    try recovered.send("\x01d");
+    try recovered.waitFor("[moo ui closed]");
+    try std.testing.expectEqual(@as(u32, 0), try recovered.waitExit());
+}
+
+test "ui manager: reconnect updates nested host session exclusion" {
+    const alloc = std.testing.allocator;
+    var h = try Harness.init(alloc);
+    defer h.deinit();
+
+    try h.startDetached("alpha", &.{ "sh", "-c", "printf 'ALPHA-MARK\\n'; exec cat" });
+    try h.startDetached("bravo", &.{ "sh", "-c", "printf 'BRAVO-MARK\\n'; exec cat" });
+
+    var outside = try PtyClient.spawn(&h, &.{"ui"}, 24, 100);
+    defer outside.deinit();
+    try outside.waitFor("BRAVO-MARK");
+    _ = try outside.signalAndWaitExit(posix.SIG.HUP);
+
+    const env = [_][2][]const u8{.{ "MOO", "bravo" }};
+    var nested = try PtyClient.spawnWithEnv(&h, &.{"ui"}, 24, 100, &env);
+    defer nested.deinit();
+    try nested.waitFor("ALPHA-MARK");
+    nested.clearOutput();
+    try nested.send("NESTED-HOST-MARK\r");
+    try nested.waitFor("NESTED-HOST-MARK");
+
+    const alpha = try h.run(&.{ "peek", "alpha" });
+    defer alloc.free(alpha.stdout);
+    defer alloc.free(alpha.stderr);
+    try std.testing.expect(std.mem.indexOf(u8, alpha.stdout, "NESTED-HOST-MARK") != null);
+
+    const bravo = try h.run(&.{ "peek", "bravo" });
+    defer alloc.free(bravo.stdout);
+    defer alloc.free(bravo.stderr);
+    try std.testing.expect(std.mem.indexOf(u8, bravo.stdout, "NESTED-HOST-MARK") == null);
+
+    try nested.send("\x01d");
+    try nested.waitFor("[moo ui closed]");
+    try std.testing.expectEqual(@as(u32, 0), try nested.waitExit());
+}
+
+test "ui manager: reconnect clears stale nested host exclusion" {
+    const alloc = std.testing.allocator;
+    var h = try Harness.init(alloc);
+    defer h.deinit();
+
+    try h.startDetached("alpha", &.{ "sh", "-c", "printf 'ALPHA-MARK\\n'; exec cat" });
+    try h.startDetached("bravo", &.{ "sh", "-c", "printf 'BRAVO-MARK\\n'; exec cat" });
+
+    const env = [_][2][]const u8{.{ "MOO", "bravo" }};
+    var nested = try PtyClient.spawnWithEnv(&h, &.{"ui"}, 24, 100, &env);
+    defer nested.deinit();
+    try nested.waitFor("ALPHA-MARK");
+    _ = try nested.signalAndWaitExit(posix.SIG.HUP);
+
+    var outside = try PtyClient.spawn(&h, &.{"ui"}, 24, 100);
+    defer outside.deinit();
+    try outside.waitFor("ALPHA-MARK");
+    outside.clearOutput();
+    try outside.send("\x01n");
+    try outside.waitFor("BRAVO-MARK");
+
+    try outside.send("\x01d");
+    try outside.waitFor("[moo ui closed]");
+    try std.testing.expectEqual(@as(u32, 0), try outside.waitExit());
 }
 
 test "ui: dragging in the viewport selects text and copies it via osc 52" {
@@ -2286,6 +2854,8 @@ test "ui: quit with C-a d leaves sessions running and restores the terminal" {
     var ui = try PtyClient.spawn(&h, &.{"ui"}, 24, 100);
     defer ui.deinit();
     try ui.waitFor("survivor");
+    const manager_id = try readUiManagerId(alloc, &h, null);
+    defer alloc.free(manager_id);
 
     try ui.send("\x01d");
     try ui.waitFor("[moo ui closed]");
@@ -2301,6 +2871,8 @@ test "ui: quit with C-a d leaves sessions running and restores the terminal" {
     defer alloc.free(ls.stderr);
     try std.testing.expect(std.mem.indexOf(u8, ls.stdout, "survivor") != null);
     try std.testing.expect(std.mem.indexOf(u8, ls.stdout, "detached") != null);
+    try std.testing.expect(!try lsSessionAttached(&h, &.{}, "survivor"));
+    try waitUiManagerGone(alloc, &h, null);
 }
 
 test "ui: viewport size tracks the terminal minus the sidebar" {

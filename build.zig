@@ -3,6 +3,8 @@ const std = @import("std");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    const test_filter = b.option([]const u8, "test-filter", "Only run tests whose name contains this substring");
+    const test_filters: []const []const u8 = if (test_filter) |filter| &.{filter} else &.{};
 
     const run_step = b.step("run", "Run moo");
     const test_step = b.step("test", "Run unit tests");
@@ -43,7 +45,7 @@ pub fn build(b: *std.Build) void {
     run_step.dependOn(&run_cmd.step);
 
     // Unit tests (in-process, no TTY required).
-    const unit_tests = b.addTest(.{ .root_module = exe_mod });
+    const unit_tests = b.addTest(.{ .root_module = exe_mod, .filters = test_filters });
     const run_unit_tests = b.addRunArtifact(unit_tests);
     test_step.dependOn(&run_unit_tests.step);
 
@@ -72,7 +74,7 @@ pub fn build(b: *std.Build) void {
         integration_mod.addImport("ghostty-vt", dep.module("ghostty-vt"));
     }
 
-    const integration_tests = b.addTest(.{ .root_module = integration_mod });
+    const integration_tests = b.addTest(.{ .root_module = integration_mod, .filters = test_filters });
     const run_integration_tests = b.addRunArtifact(integration_tests);
     integration_step.dependOn(&run_integration_tests.step);
 

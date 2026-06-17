@@ -30,7 +30,8 @@ exactly as a human would see it.
 ## Features
 
 - Sessions that survive disconnects: detach with `Ctrl-A d`, reattach with `moo attach`.
-- A full-screen session manager: `moo ui` lists sessions in a sidebar.
+- A full-screen session manager: `moo ui` lists sessions in a sidebar and resumes
+  the same UI after a phone or SSH reconnect.
 - Faithful redraws from libghostty terminal state, including SGR styles, cursor position, scrolling regions, window title, and terminal modes.
 - Agent-friendly automation primitives: `send`, `peek`, `wait`, and `--json` output, all usable without a TTY.
 - Coding-agent harnesses: `--agent claude|codex|pi` wraps an agent so `moo read` can de-noise its transcript and report whether it is idle, working, or waiting on you.
@@ -53,7 +54,7 @@ install location (default: `/usr/local/bin` when writable, otherwise
 moo new                    # new session running $SHELL, attached
 moo new work               # named session
 moo new work -d -- make    # create detached, running a command
-moo ui                     # manage sessions in a full-screen UI (alias: i)
+moo ui                     # manage sessions in a resumable full-screen UI (alias: i)
 moo ls                     # list sessions
 moo attach work            # reattach (alias: at, a)
 moo rename work api        # rename a session

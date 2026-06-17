@@ -150,6 +150,10 @@ pub const commands = [_]Entry{
         \\session runs in a viewport on the right, rendered live from
         \\terminal state.
         \\
+        \\The UI manager is resumable: if a phone or SSH connection
+        \\drops, running 'moo ui' again reconnects to the same focused
+        \\session and sidebar state.
+        \\
         \\flags:
         \\  -w, --workspace <name>   manage a named workspace's sessions
         \\                           (see 'moo help workspaces')
