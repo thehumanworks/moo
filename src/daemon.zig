@@ -73,6 +73,7 @@ pub const Daemon = struct {
     /// Wall-clock time (milliseconds) of the most recent window output
     /// or client input; reported as session idle time.
     last_activity_ms: i64 = 0,
+    event_seq: u64 = 1,
 
     sig_read: posix.fd_t = -1,
     quitting: bool = false,
@@ -265,6 +266,7 @@ pub const Daemon = struct {
             .input => {
                 if (!conn.attached) return;
                 self.last_activity_ms = std.time.milliTimestamp();
+                self.bumpEvent();
                 const Handler = struct {
                     daemon: *Daemon,
                     conn: *Conn,
@@ -286,6 +288,7 @@ pub const Daemon = struct {
                 if (!conn.attached) return;
                 const size = try protocol.SizePayload.decode(msg.payload);
                 self.resizeWindow(size.rows, size.cols);
+                self.bumpEvent();
             },
 
             .detach_req => {
@@ -347,6 +350,7 @@ pub const Daemon = struct {
                     return;
                 };
                 self.last_activity_ms = now;
+                self.bumpEvent();
                 conn.send(.ok, "");
             } else conn.send(.err, "no window");
         } else if (std.mem.eql(u8, cmd, "peek")) {
@@ -407,6 +411,54 @@ pub const Daemon = struct {
                 }
             }
             conn.send(.ok, out.items);
+        } else if (std.mem.eql(u8, cmd, "state")) {
+            var attached = false;
+            for (self.conns.items) |c| {
+                if (c.attached and !c.closed) attached = true;
+            }
+            const idle: i64 = @max(0, now - self.last_activity_ms);
+            const out_idle: i64 = if (self.liveWindow()) |w|
+                @max(0, now - w.last_output_ms)
+            else
+                0;
+            var out: std.ArrayList(u8) = .empty;
+            defer out.deinit(self.alloc);
+            try out.print(self.alloc, "{s}\t{s}\t{d}\t{d}\t{d}\t{d}\t{d}\t", .{
+                self.opts.name,
+                if (attached) "Attached" else "Detached",
+                idle,
+                out_idle,
+                self.rows,
+                self.cols,
+                self.event_seq,
+            });
+            if (self.liveWindow()) |w| {
+                for (w.title()) |byte| {
+                    if (byte < 0x20 or byte == 0x7f) continue;
+                    try out.append(self.alloc, byte);
+                }
+            }
+            conn.send(.ok, out.items);
+        } else if (std.mem.eql(u8, cmd, "resize")) {
+            if (argv.len != 3) {
+                conn.send(.err, "usage: resize <rows> <cols>");
+                return;
+            }
+            const rows = std.fmt.parseInt(u16, argv[1], 10) catch {
+                conn.send(.err, "invalid rows");
+                return;
+            };
+            const cols = std.fmt.parseInt(u16, argv[2], 10) catch {
+                conn.send(.err, "invalid cols");
+                return;
+            };
+            if (rows == 0 or cols == 0) {
+                conn.send(.err, "invalid size");
+                return;
+            }
+            self.resizeWindow(rows, cols);
+            self.bumpEvent();
+            conn.send(.ok, "");
         } else if (std.mem.eql(u8, cmd, "rename")) {
             if (argv.len != 2) {
                 conn.send(.err, "usage: rename <new-name>");
@@ -420,6 +472,7 @@ pub const Daemon = struct {
             // connecting to the dying daemon and reading EOF.
             self.retireListener();
             conn.send(.ok, "");
+            self.bumpEvent();
             if (self.win) |w| {
                 posix.kill(w.child_pid, posix.SIG.HUP) catch {};
             }
@@ -483,6 +536,7 @@ pub const Daemon = struct {
         self.opts.name = new_owned_name;
         self.opts.socket_path = new_path;
         log.info("renamed to {s}", .{new_name});
+        self.bumpEvent();
         conn.send(.ok, "");
     }
 
@@ -511,6 +565,7 @@ pub const Daemon = struct {
         const now = std.time.milliTimestamp();
         win.last_output_ms = now;
         self.last_activity_ms = now;
+        self.bumpEvent();
 
         const conn = (if (win.passthrough) self.attachedConn() else null) orelse {
             // Not passed through: the window answers queries itself.
@@ -620,6 +675,10 @@ pub const Daemon = struct {
                 log.warn("resize window failed: {}", .{err});
             };
         }
+    }
+
+    fn bumpEvent(self: *Daemon) void {
+        self.event_seq +|= 1;
     }
 
     fn repaintTo(self: *Daemon, conn: *Conn) !void {

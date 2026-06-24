@@ -40,6 +40,7 @@ pub const overview =
     \\  Administration
     \\    kill <name | --all>          end a session, or all of them
     \\    rename <name> <new-name>     rename a session
+    \\    serve [--addr host:port]     expose the localhost REST API
     \\
     \\  Information
     \\    ws [--json]                  list workspaces and session counts
@@ -244,6 +245,36 @@ pub const commands = [_]Entry{
         \\examples:
         \\  moo ws                       a WORKSPACE / SESSIONS table
         \\  moo ws --json | jq .         per-workspace counts, for scripts
+        \\
+        ,
+    },
+    .{
+        .name = "serve",
+        .body =
+        \\usage: moo serve [--addr <host:port>] [--token-env <name>]
+        \\
+        \\Start the v1 HTTP REST API for remote-safe automation of detached
+        \\sessions. The server is localhost-first: the default address is
+        \\127.0.0.1:0, and binding outside loopback requires bearer-token
+        \\authentication through --token-env.
+        \\
+        \\The API reuses the same session daemons and libghostty-rendered
+        \\terminal state as the CLI. It does not attach to sessions or steal
+        \\interactive clients.
+        \\
+        \\workspace ids:
+        \\  @default                  the default workspace
+        \\  <name>                    a named workspace
+        \\
+        \\flags:
+        \\  --addr <host:port>        bind address; default 127.0.0.1:0
+        \\  --token-env <name>        environment variable containing the
+        \\                            bearer token required for API requests
+        \\
+        \\examples:
+        \\  moo serve
+        \\  MOO_API_TOKEN=secret moo serve --addr 0.0.0.0:8765 --token-env MOO_API_TOKEN
+        \\  curl http://127.0.0.1:8765/v1/health
         \\
         ,
     },

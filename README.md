@@ -58,6 +58,7 @@ moo ui                     # manage sessions in a resumable full-screen UI (alia
 moo ls                     # list sessions
 moo attach work            # reattach (alias: at, a)
 moo rename work api        # rename a session
+moo serve                  # expose the localhost REST API
 moo kill work              # end a session
 moo kill --all             # end every session
 ```
@@ -108,6 +109,9 @@ moo kill build                         # 5. clean up
   `--key Enter,C-c,Up` names control keys, and stdin mode is binary
   safe.
 - **Machine-readable output**: `ls --json` and `peek --json`.
+- **HTTP coordination**: `moo serve --addr 127.0.0.1:8765`
+  exposes the same create, send, wait, screen, transcript, and workspace
+  primitives over a localhost-first REST API; see `docs/http-api.md`.
 - **Exit codes**: `0` success, `1` error, `2` usage error, `3` no such
   session, `4` wait timed out.
 

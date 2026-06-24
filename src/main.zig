@@ -14,6 +14,8 @@ const ui = @import("ui.zig");
 
 pub const version = "0.5.20";
 
+var session_child_close_fd: posix.fd_t = -1;
+
 /// Route std.log through a filter. libghostty's VT stream parser logs
 /// unimplemented sequences at info level under the `stream` scope (e.g.
 /// "OSC 1 (change icon) received and ignored"). In `moo ui` the parser runs
@@ -96,6 +98,7 @@ pub fn main() !void {
     if (eql(cmd, "wait")) return cmdWait(alloc, rest);
     if (eql(cmd, "kill")) return cmdKill(alloc, rest);
     if (eql(cmd, "rename")) return cmdRename(alloc, rest);
+    if (eql(cmd, "serve")) return cmdServe(alloc, rest);
     if (eql(cmd, "version") or eql(cmd, "-V") or eql(cmd, "--version")) return cmdVersion(alloc);
     if (eql(cmd, "help") or eql(cmd, "-h") or eql(cmd, "--help")) return cmdHelp(alloc, rest);
     fail(exit_usage, "unknown command '{s}' (run 'moo help')", .{cmd});
@@ -170,6 +173,23 @@ fn resolveSession(
     dir: []const u8,
     want: []const u8,
 ) ![]u8 {
+    return resolveSessionResult(alloc, dir, want) catch |err| switch (err) {
+        error.AmbiguousSession => {
+            const sessions = try paths.listSessions(alloc, dir);
+            fail(exit_no_session, "ambiguous session '{s}': matches {s}", .{
+                want, joinNames(alloc, sessions),
+            });
+        },
+        error.NoSession => fail(exit_no_session, "no session matching '{s}' (run 'moo ls')", .{want}),
+        else => return err,
+    };
+}
+
+fn resolveSessionResult(
+    alloc: std.mem.Allocator,
+    dir: []const u8,
+    want: []const u8,
+) ![]u8 {
     const sessions = try paths.listSessions(alloc, dir);
     defer {
         for (sessions) |s| alloc.free(s);
@@ -188,10 +208,8 @@ fn resolveSession(
         }
     }
     if (count == 1) return alloc.dupe(u8, match.?);
-    if (count > 1) fail(exit_no_session, "ambiguous session '{s}': matches {s}", .{
-        want, joinNames(alloc, sessions),
-    });
-    fail(exit_no_session, "no session matching '{s}' (run 'moo ls')", .{want});
+    if (count > 1) return error.AmbiguousSession;
+    return error.NoSession;
 }
 
 pub const SessionInfo = struct {
@@ -245,14 +263,26 @@ fn mustControl(
     name: []const u8,
     argv: []const []const u8,
 ) !client.ControlResult {
-    const sock = try paths.socketPath(alloc, dir, name);
-    defer alloc.free(sock);
-    return client.control(alloc, sock, argv) catch |err| switch (err) {
-        error.FileNotFound, error.ConnectionRefused, error.ConnectionLost => fail(
+    return controlSession(alloc, dir, name, argv) catch |err| switch (err) {
+        error.NoSession => fail(
             exit_no_session,
             "no session named {s}",
             .{name},
         ),
+        else => return err,
+    };
+}
+
+fn controlSession(
+    alloc: std.mem.Allocator,
+    dir: []const u8,
+    name: []const u8,
+    argv: []const []const u8,
+) !client.ControlResult {
+    const sock = try paths.socketPath(alloc, dir, name);
+    defer alloc.free(sock);
+    return client.control(alloc, sock, argv) catch |err| switch (err) {
+        error.FileNotFound, error.ConnectionRefused, error.ConnectionLost => error.NoSession,
         else => return err,
     };
 }
@@ -295,36 +325,43 @@ fn cmdNew(alloc: std.mem.Allocator, args: []const [:0]const u8) !void {
     const ws = activeWorkspace(ws_flag);
     const dir = try workspaceDirForActive("new", alloc, ws);
     defer alloc.free(dir);
-    return createSession(alloc, dir, name, detached, agent, ws, @ptrCast(cmd_argv));
+    var name_buf: [paths.max_name_len]u8 = undefined;
+    const session_name = name orelse paths.defaultName(&name_buf, dir);
+    startSessionNamed(alloc, dir, session_name, agent, ws, @ptrCast(cmd_argv), 24, 80) catch |err| switch (err) {
+        error.InvalidSessionName => usageFail("new", "invalid session name '{s}'", .{session_name}),
+        error.SessionExists => fail(
+            exit_runtime,
+            "session {s} already exists (run 'moo attach {s}')",
+            .{ session_name, session_name },
+        ),
+        else => return err,
+    };
+    if (detached) {
+        // The name on stdout so scripts can capture it.
+        try stdoutPrint(alloc, "{s}\n", .{session_name});
+        return;
+    }
+    try attachLoop(alloc, dir, session_name);
 }
 
-fn createSession(
+fn startSessionNamed(
     alloc: std.mem.Allocator,
     dir: []const u8,
-    name_opt: ?[]const u8,
-    detached: bool,
+    name: []const u8,
     agent: ?harness.Agent,
     workspace: ?[]const u8,
     cmd_argv: []const []const u8,
+    rows: u16,
+    cols: u16,
 ) !void {
-    var name_buf: [paths.max_name_len]u8 = undefined;
-    const name = name_opt orelse paths.defaultName(&name_buf, dir);
-    paths.validateName(name) catch
-        usageFail("new", "invalid session name '{s}'", .{name});
+    try paths.validateName(name);
 
     const sock = try paths.socketPath(alloc, dir, name);
     defer alloc.free(sock);
 
     // Claim the socket before any agent setup, so a name clash can't clobber the
     // existing session's sidecar or transcript store.
-    const listen_fd = bindListen(alloc, sock) catch |err| switch (err) {
-        error.SessionExists => fail(
-            exit_runtime,
-            "session {s} already exists (run 'moo attach {s}')",
-            .{ name, name },
-        ),
-        else => return err,
-    };
+    const listen_fd = try bindListen(alloc, sock);
 
     // An agent harness augments the launch command (pinning a session id),
     // supplies per-session env (e.g. CODEX_HOME), and records a sidecar so the
@@ -359,21 +396,17 @@ fn createSession(
             .listen_fd = listen_fd,
             .argv = argv,
             .env_overrides = env_overrides,
+            .rows = rows,
+            .cols = cols,
         });
         return;
     }
     const pid = try posix.fork();
     if (pid == 0) {
-        runDaemon(alloc, name, sock, listen_fd, argv, env_overrides);
+        if (session_child_close_fd >= 0) posix.close(session_child_close_fd);
+        runDaemon(alloc, name, sock, listen_fd, argv, env_overrides, rows, cols);
     }
     posix.close(listen_fd);
-
-    if (detached) {
-        // The name on stdout so scripts can capture it.
-        try stdoutPrint(alloc, "{s}\n", .{name});
-        return;
-    }
-    try attachLoop(alloc, dir, name);
 }
 
 const AgentLaunch = struct {
@@ -1250,6 +1283,909 @@ fn cmdRename(alloc: std.mem.Allocator, args: []const [:0]const u8) !void {
     if (!result.ok) fail(exit_runtime, "{s}", .{result.text});
 }
 
+// -- HTTP API -------------------------------------------------------------
+
+const default_http_addr = "127.0.0.1:0";
+const max_http_request = protocol.max_payload + 16 * 1024;
+
+const ServeConfig = struct {
+    token: ?[]const u8 = null,
+};
+
+const HttpRequest = struct {
+    raw: []u8,
+    method: []const u8,
+    target: []const u8,
+    path: []const u8,
+    query: []const u8,
+    body: []const u8,
+    authorization: ?[]const u8,
+
+    fn deinit(self: HttpRequest, alloc: std.mem.Allocator) void {
+        alloc.free(self.raw);
+    }
+};
+
+const SessionState = struct {
+    text: []u8,
+    attached: bool,
+    idle_ms: i64,
+    out_idle_ms: i64,
+    rows: u32,
+    cols: u32,
+    event_seq: u64,
+    title: []const u8,
+};
+
+fn cmdServe(alloc: std.mem.Allocator, args: []const [:0]const u8) !void {
+    var addr_text: []const u8 = default_http_addr;
+    var token_env: ?[]const u8 = null;
+
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        const arg = args[i];
+        if (isHelpFlag(arg)) return printHelpPage("serve");
+        if (flagValue("serve", "--addr", args, &i)) |v| {
+            addr_text = v;
+        } else if (flagValue("serve", "--token-env", args, &i)) |v| {
+            token_env = v;
+        } else {
+            usageFail("serve", "unexpected argument '{s}'", .{arg});
+        }
+    }
+
+    const addr = parseListenAddress(addr_text) catch
+        usageFail("serve", "bad --addr '{s}' (use host:port)", .{addr_text});
+    const token = if (token_env) |env_name| blk: {
+        const value = posix.getenv(env_name) orelse
+            usageFail("serve", "--token-env {s} is unset", .{env_name});
+        if (value.len == 0) usageFail("serve", "--token-env {s} is empty", .{env_name});
+        break :blk value;
+    } else null;
+    if (!isLoopback(addr) and token == null) {
+        usageFail("serve", "non-loopback --addr requires --token-env", .{});
+    }
+
+    var server = try addr.listen(.{ .reuse_address = true });
+    defer server.deinit();
+    try stdoutPrint(alloc, "moo serve http://{f}\n", .{server.listen_address});
+
+    const cfg: ServeConfig = .{ .token = token };
+    while (true) {
+        {
+            var conn = server.accept() catch |err| {
+                std.log.warn("http accept failed: {}", .{err});
+                continue;
+            };
+            defer conn.stream.close();
+            handleHttpConnection(alloc, conn.stream, cfg) catch |err| {
+                std.log.warn("http request failed: {}", .{err});
+            };
+        }
+    }
+}
+
+fn isLoopback(addr: std.net.Address) bool {
+    return switch (addr.any.family) {
+        posix.AF.INET => blk: {
+            const bytes: *const [4]u8 = @ptrCast(&addr.in.sa.addr);
+            break :blk bytes[0] == 127;
+        },
+        posix.AF.INET6 => blk: {
+            const bytes = addr.in6.sa.addr;
+            for (bytes[0..15]) |b| {
+                if (b != 0) break :blk false;
+            }
+            break :blk bytes[15] == 1;
+        },
+        else => false,
+    };
+}
+
+fn parseListenAddress(text: []const u8) !std.net.Address {
+    if (text.len == 0) return error.InvalidAddress;
+    if (text[0] == '[') {
+        const end = std.mem.indexOfScalar(u8, text, ']') orelse return error.InvalidAddress;
+        if (end + 1 >= text.len or text[end + 1] != ':') return error.InvalidAddress;
+        const port = try std.fmt.parseInt(u16, text[end + 2 ..], 10);
+        return std.net.Address.parseIp6(text[1..end], port);
+    }
+    const idx = std.mem.lastIndexOfScalar(u8, text, ':') orelse return error.InvalidAddress;
+    const port = try std.fmt.parseInt(u16, text[idx + 1 ..], 10);
+    return std.net.Address.parseIp(text[0..idx], port);
+}
+
+fn handleHttpConnection(alloc: std.mem.Allocator, stream: std.net.Stream, cfg: ServeConfig) !void {
+    const req = readHttpRequest(alloc, stream) catch {
+        return sendError(stream, 400, "bad_request", "malformed HTTP request");
+    };
+    defer req.deinit(alloc);
+    try dispatchHttp(alloc, stream, req, cfg);
+}
+
+fn readHttpRequest(alloc: std.mem.Allocator, stream: std.net.Stream) !HttpRequest {
+    var raw: std.ArrayList(u8) = .empty;
+    errdefer raw.deinit(alloc);
+
+    var header_end: ?usize = null;
+    var buf: [4096]u8 = undefined;
+    while (header_end == null) {
+        const n = try stream.read(&buf);
+        if (n == 0) return error.EndOfStream;
+        try raw.appendSlice(alloc, buf[0..n]);
+        if (raw.items.len > max_http_request) return error.RequestTooLarge;
+        if (std.mem.indexOf(u8, raw.items, "\r\n\r\n")) |idx| header_end = idx;
+    }
+
+    const body_start = header_end.? + 4;
+    const content_len = parseContentLength(raw.items[0..header_end.?]) orelse 0;
+    if (content_len > protocol.max_payload) return error.RequestTooLarge;
+    while (raw.items.len < body_start + content_len) {
+        const n = try stream.read(&buf);
+        if (n == 0) return error.EndOfStream;
+        try raw.appendSlice(alloc, buf[0..n]);
+        if (raw.items.len > max_http_request) return error.RequestTooLarge;
+    }
+
+    const owned = try raw.toOwnedSlice(alloc);
+    errdefer alloc.free(owned);
+    const headers = owned[0..header_end.?];
+    var lines = std.mem.splitSequence(u8, headers, "\r\n");
+    const request_line = lines.next() orelse return error.BadRequest;
+    var parts = std.mem.splitScalar(u8, request_line, ' ');
+    const method = parts.next() orelse return error.BadRequest;
+    const target = parts.next() orelse return error.BadRequest;
+    _ = parts.next() orelse return error.BadRequest;
+
+    var authorization: ?[]const u8 = null;
+    while (lines.next()) |line| {
+        const colon = std.mem.indexOfScalar(u8, line, ':') orelse continue;
+        const name = std.mem.trim(u8, line[0..colon], " \t");
+        const value = std.mem.trim(u8, line[colon + 1 ..], " \t");
+        if (std.ascii.eqlIgnoreCase(name, "Authorization")) authorization = value;
+    }
+
+    const q = std.mem.indexOfScalar(u8, target, '?');
+    const path = if (q) |idx| target[0..idx] else target;
+    const query = if (q) |idx| target[idx + 1 ..] else "";
+    return .{
+        .raw = owned,
+        .method = method,
+        .target = target,
+        .path = path,
+        .query = query,
+        .body = owned[body_start .. body_start + content_len],
+        .authorization = authorization,
+    };
+}
+
+fn parseContentLength(headers: []const u8) ?usize {
+    var lines = std.mem.splitSequence(u8, headers, "\r\n");
+    _ = lines.next();
+    while (lines.next()) |line| {
+        const colon = std.mem.indexOfScalar(u8, line, ':') orelse continue;
+        const name = std.mem.trim(u8, line[0..colon], " \t");
+        if (!std.ascii.eqlIgnoreCase(name, "Content-Length")) continue;
+        const value = std.mem.trim(u8, line[colon + 1 ..], " \t");
+        return std.fmt.parseInt(usize, value, 10) catch null;
+    }
+    return null;
+}
+
+fn dispatchHttp(
+    alloc: std.mem.Allocator,
+    stream: std.net.Stream,
+    req: HttpRequest,
+    cfg: ServeConfig,
+) !void {
+    if (std.mem.eql(u8, req.method, "GET") and std.mem.eql(u8, req.path, "/v1/health")) {
+        return sendJson(stream, 200, "{\"ok\":true,\"service\":\"moo\"}\n");
+    }
+    if (!authorized(req, cfg)) {
+        return sendError(stream, 401, "unauthorized", "missing or invalid bearer token");
+    }
+
+    var seg_buf: [8][]const u8 = undefined;
+    const segs = splitPath(req.path, &seg_buf);
+    if (segs.len == 2 and eqlSegs(segs, &.{ "v1", "workspaces" }) and std.mem.eql(u8, req.method, "GET")) {
+        return handleWorkspaces(alloc, stream);
+    }
+    if (segs.len >= 4 and std.mem.eql(u8, segs[0], "v1") and std.mem.eql(u8, segs[1], "workspaces") and
+        std.mem.eql(u8, segs[3], "sessions"))
+    {
+        const workspace = workspaceFromSegment(segs[2]) catch
+            return sendError(stream, 400, "bad_workspace", "invalid workspace segment");
+        if (segs.len == 4) {
+            if (std.mem.eql(u8, req.method, "GET")) return handleListSessions(alloc, stream, workspace);
+            if (std.mem.eql(u8, req.method, "POST")) return handleCreateSession(alloc, stream, workspace, req.body);
+        } else if (segs.len >= 5) {
+            const want = segs[4];
+            if (segs.len == 5) {
+                if (std.mem.eql(u8, req.method, "GET")) return handleSessionInfo(alloc, stream, workspace, want);
+                if (std.mem.eql(u8, req.method, "PATCH")) return handleRenameSession(alloc, stream, workspace, want, req.body);
+                if (std.mem.eql(u8, req.method, "DELETE")) return handleDeleteSession(alloc, stream, workspace, want);
+            } else if (segs.len == 6) {
+                const action = segs[5];
+                if (std.mem.eql(u8, action, "input") and std.mem.eql(u8, req.method, "POST")) {
+                    return handleInput(alloc, stream, workspace, want, req.body);
+                }
+                if (std.mem.eql(u8, action, "screen") and std.mem.eql(u8, req.method, "GET")) {
+                    return handleScreen(alloc, stream, workspace, want, req.query);
+                }
+                if (std.mem.eql(u8, action, "wait") and std.mem.eql(u8, req.method, "POST")) {
+                    return handleWait(alloc, stream, workspace, want, req.body);
+                }
+                if (std.mem.eql(u8, action, "resize") and std.mem.eql(u8, req.method, "POST")) {
+                    return handleResize(alloc, stream, workspace, want, req.body);
+                }
+                if (std.mem.eql(u8, action, "transcript") and std.mem.eql(u8, req.method, "GET")) {
+                    return handleTranscript(alloc, stream, workspace, want);
+                }
+                if (std.mem.eql(u8, action, "events") and std.mem.eql(u8, req.method, "GET")) {
+                    return handleEvents(alloc, stream, workspace, want, req.query);
+                }
+            }
+        }
+    }
+    return sendError(stream, 404, "not_found", "unknown endpoint");
+}
+
+fn authorized(req: HttpRequest, cfg: ServeConfig) bool {
+    const token = cfg.token orelse return true;
+    const header = req.authorization orelse return false;
+    if (!std.mem.startsWith(u8, header, "Bearer ")) return false;
+    return std.mem.eql(u8, header["Bearer ".len..], token);
+}
+
+fn splitPath(path: []const u8, buf: *[8][]const u8) []const []const u8 {
+    var count: usize = 0;
+    var it = std.mem.splitScalar(u8, path, '/');
+    while (it.next()) |seg| {
+        if (seg.len == 0) continue;
+        if (count >= buf.len) break;
+        buf[count] = seg;
+        count += 1;
+    }
+    return buf[0..count];
+}
+
+fn eqlSegs(segs: []const []const u8, want: []const []const u8) bool {
+    if (segs.len != want.len) return false;
+    for (segs, want) |a, b| {
+        if (!std.mem.eql(u8, a, b)) return false;
+    }
+    return true;
+}
+
+fn workspaceFromSegment(segment: []const u8) !?[]const u8 {
+    if (std.mem.eql(u8, segment, "@default")) return null;
+    try paths.validateName(segment);
+    return segment;
+}
+
+fn workspaceDirHttp(alloc: std.mem.Allocator, workspace: ?[]const u8) ![]u8 {
+    return paths.socketDirFor(alloc, workspace);
+}
+
+fn handleWorkspaces(alloc: std.mem.Allocator, stream: std.net.Stream) !void {
+    const base = try paths.socketDir(alloc);
+    defer alloc.free(base);
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(alloc);
+    try out.appendSlice(alloc, "{\"workspaces\":[");
+    try appendWorkspaceJson(alloc, &out, "@default", "", try countSessions(alloc, base));
+
+    const ws_root = try std.fs.path.join(alloc, &.{ base, "ws" });
+    defer alloc.free(ws_root);
+    var names: std.ArrayList([]u8) = .empty;
+    defer {
+        for (names.items) |n| alloc.free(n);
+        names.deinit(alloc);
+    }
+    if (std.fs.cwd().openDir(ws_root, .{ .iterate = true })) |dir_const| {
+        var dir = dir_const;
+        defer dir.close();
+        var it = dir.iterate();
+        while (try it.next()) |entry| {
+            if (entry.kind != .directory) continue;
+            paths.validateName(entry.name) catch continue;
+            try names.append(alloc, try alloc.dupe(u8, entry.name));
+        }
+    } else |err| switch (err) {
+        error.FileNotFound => {},
+        else => return err,
+    }
+    std.mem.sort([]u8, names.items, {}, struct {
+        fn lessThan(_: void, a: []u8, b: []u8) bool {
+            return std.mem.lessThan(u8, a, b);
+        }
+    }.lessThan);
+    for (names.items) |name| {
+        const dir = try std.fs.path.join(alloc, &.{ ws_root, name });
+        defer alloc.free(dir);
+        try out.append(alloc, ',');
+        try appendWorkspaceJson(alloc, &out, name, name, try countSessions(alloc, dir));
+    }
+    try out.appendSlice(alloc, "]}\n");
+    return sendOwnedJson(alloc, stream, 200, &out);
+}
+
+fn appendWorkspaceJson(
+    alloc: std.mem.Allocator,
+    out: *std.ArrayList(u8),
+    id: []const u8,
+    name: []const u8,
+    sessions: usize,
+) !void {
+    try out.appendSlice(alloc, "{\"id\":");
+    try appendJsonString(alloc, out, id);
+    try out.appendSlice(alloc, ",\"workspace\":");
+    try appendJsonString(alloc, out, name);
+    try out.print(alloc, ",\"sessions\":{d}}}", .{sessions});
+}
+
+fn handleListSessions(alloc: std.mem.Allocator, stream: std.net.Stream, workspace: ?[]const u8) !void {
+    const dir = try workspaceDirHttp(alloc, workspace);
+    defer alloc.free(dir);
+    const sessions = try paths.listSessions(alloc, dir);
+    defer {
+        for (sessions) |s| alloc.free(s);
+        alloc.free(sessions);
+    }
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(alloc);
+    try out.appendSlice(alloc, "{\"sessions\":[");
+    var emitted = false;
+    for (sessions) |name| {
+        const info = try sessionInfo(alloc, dir, name) orelse continue;
+        defer alloc.free(info.text);
+        if (emitted) try out.append(alloc, ',');
+        emitted = true;
+        try appendSessionInfoJson(alloc, &out, name, info, null);
+    }
+    try out.appendSlice(alloc, "]}\n");
+    return sendOwnedJson(alloc, stream, 200, &out);
+}
+
+fn handleCreateSession(
+    alloc: std.mem.Allocator,
+    stream: std.net.Stream,
+    workspace: ?[]const u8,
+    body: []const u8,
+) !void {
+    var parsed = std.json.parseFromSlice(std.json.Value, alloc, body, .{}) catch
+        return sendError(stream, 400, "bad_json", "request body must be a JSON object");
+    defer parsed.deinit();
+    if (parsed.value != .object) return sendError(stream, 400, "bad_json", "request body must be a JSON object");
+
+    const dir = try workspaceDirHttp(alloc, workspace);
+    defer alloc.free(dir);
+    var name_buf: [paths.max_name_len]u8 = undefined;
+    const requested = jsonString(parsed.value, "name");
+    const name = requested orelse paths.defaultName(&name_buf, dir);
+    const agent = if (jsonString(parsed.value, "agent")) |agent_id| blk: {
+        break :blk harness.Agent.fromId(agent_id) orelse
+            return sendError(stream, 400, "bad_agent", "unknown agent");
+    } else null;
+    const rows = jsonU16(parsed.value, "rows") orelse 24;
+    const cols = jsonU16(parsed.value, "cols") orelse 80;
+    const argv = jsonArgv(alloc, parsed.value) catch |err| switch (err) {
+        error.BadArgv => return sendError(stream, 400, "bad_argv", "argv or command must be an array of strings"),
+        else => return err,
+    };
+    defer alloc.free(argv);
+
+    const prev_close_fd = session_child_close_fd;
+    session_child_close_fd = stream.handle;
+    defer session_child_close_fd = prev_close_fd;
+    startSessionNamed(alloc, dir, name, agent, workspace, argv, rows, cols) catch |err| switch (err) {
+        error.InvalidSessionName => return sendError(stream, 400, "bad_session_name", "invalid session name"),
+        error.SessionExists => return sendError(stream, 409, "session_exists", "session already exists"),
+        else => return err,
+    };
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(alloc);
+    try out.appendSlice(alloc, "{\"session\":");
+    try appendJsonString(alloc, &out, name);
+    try out.appendSlice(alloc, ",\"workspace\":");
+    try appendJsonString(alloc, &out, workspace orelse "");
+    try out.appendSlice(alloc, ",\"created\":true}\n");
+    return sendOwnedJson(alloc, stream, 201, &out);
+}
+
+fn jsonArgv(alloc: std.mem.Allocator, root: std.json.Value) ![]const []const u8 {
+    const value = if (root == .object)
+        root.object.get("argv") orelse root.object.get("command")
+    else
+        null;
+    const arr = if (value) |v| switch (v) {
+        .array => |a| a,
+        else => return error.BadArgv,
+    } else return alloc.alloc([]const u8, 0);
+    var out = try alloc.alloc([]const u8, arr.items.len);
+    errdefer alloc.free(out);
+    for (arr.items, 0..) |item, idx| {
+        out[idx] = switch (item) {
+            .string => |s| s,
+            else => return error.BadArgv,
+        };
+    }
+    return out;
+}
+
+fn handleResize(
+    alloc: std.mem.Allocator,
+    stream: std.net.Stream,
+    workspace: ?[]const u8,
+    want: []const u8,
+    body: []const u8,
+) !void {
+    var parsed = std.json.parseFromSlice(std.json.Value, alloc, body, .{}) catch
+        return sendError(stream, 400, "bad_json", "request body must be JSON");
+    defer parsed.deinit();
+    const rows = jsonU16(parsed.value, "rows") orelse
+        return sendError(stream, 400, "bad_resize", "rows is required");
+    const cols = jsonU16(parsed.value, "cols") orelse
+        return sendError(stream, 400, "bad_resize", "cols is required");
+
+    const dir = try workspaceDirHttp(alloc, workspace);
+    defer alloc.free(dir);
+    const name = resolveSessionResult(alloc, dir, want) catch |err| return sendResolveError(stream, err);
+    defer alloc.free(name);
+    var rows_buf: [16]u8 = undefined;
+    var cols_buf: [16]u8 = undefined;
+    const rows_s = try std.fmt.bufPrint(&rows_buf, "{d}", .{rows});
+    const cols_s = try std.fmt.bufPrint(&cols_buf, "{d}", .{cols});
+    const result = try controlSession(alloc, dir, name, &.{ "resize", rows_s, cols_s });
+    defer alloc.free(result.text);
+    if (!result.ok) return sendError(stream, 400, "resize_failed", result.text);
+    return sendJson(stream, 200, "{\"resized\":true}\n");
+}
+
+fn handleSessionInfo(
+    alloc: std.mem.Allocator,
+    stream: std.net.Stream,
+    workspace: ?[]const u8,
+    want: []const u8,
+) !void {
+    const dir = try workspaceDirHttp(alloc, workspace);
+    defer alloc.free(dir);
+    const name = resolveSessionResult(alloc, dir, want) catch |err| return sendResolveError(stream, err);
+    defer alloc.free(name);
+    const info = try sessionInfo(alloc, dir, name) orelse
+        return sendError(stream, 404, "not_found", "session not found");
+    defer alloc.free(info.text);
+    const state = try sessionState(alloc, dir, name) orelse null;
+    defer if (state) |s| alloc.free(s.text);
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(alloc);
+    try appendSessionInfoJson(alloc, &out, name, info, if (state) |s| s.event_seq else null);
+    try out.append(alloc, '\n');
+    return sendOwnedJson(alloc, stream, 200, &out);
+}
+
+fn appendSessionInfoJson(
+    alloc: std.mem.Allocator,
+    out: *std.ArrayList(u8),
+    name: []const u8,
+    info: SessionInfo,
+    event_seq: ?u64,
+) !void {
+    try out.appendSlice(alloc, "{\"name\":");
+    try appendJsonString(alloc, out, name);
+    try out.print(alloc, ",\"attached\":{},\"idle_ms\":{d},\"out_idle_ms\":{d},\"title\":", .{
+        info.attached,
+        info.idle_ms,
+        info.out_idle_ms,
+    });
+    try appendJsonString(alloc, out, info.title);
+    if (event_seq) |seq| try out.print(alloc, ",\"cursor\":{d}", .{seq});
+    try out.append(alloc, '}');
+}
+
+fn handleRenameSession(
+    alloc: std.mem.Allocator,
+    stream: std.net.Stream,
+    workspace: ?[]const u8,
+    want: []const u8,
+    body: []const u8,
+) !void {
+    var parsed = std.json.parseFromSlice(std.json.Value, alloc, body, .{}) catch
+        return sendError(stream, 400, "bad_json", "request body must be JSON");
+    defer parsed.deinit();
+    const new_name = jsonString(parsed.value, "name") orelse
+        return sendError(stream, 400, "bad_request", "name is required");
+    paths.validateName(new_name) catch
+        return sendError(stream, 400, "bad_session_name", "invalid session name");
+    const dir = try workspaceDirHttp(alloc, workspace);
+    defer alloc.free(dir);
+    const name = resolveSessionResult(alloc, dir, want) catch |err| return sendResolveError(stream, err);
+    defer alloc.free(name);
+    const result = try controlSession(alloc, dir, name, &.{ "rename", new_name });
+    defer alloc.free(result.text);
+    if (!result.ok) return sendError(stream, 409, "rename_failed", result.text);
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(alloc);
+    try out.appendSlice(alloc, "{\"session\":");
+    try appendJsonString(alloc, &out, new_name);
+    try out.appendSlice(alloc, ",\"renamed\":true}\n");
+    return sendOwnedJson(alloc, stream, 200, &out);
+}
+
+fn handleDeleteSession(
+    alloc: std.mem.Allocator,
+    stream: std.net.Stream,
+    workspace: ?[]const u8,
+    want: []const u8,
+) !void {
+    const dir = try workspaceDirHttp(alloc, workspace);
+    defer alloc.free(dir);
+    const name = resolveSessionResult(alloc, dir, want) catch |err| return sendResolveError(stream, err);
+    defer alloc.free(name);
+    const result = try controlSession(alloc, dir, name, &.{"quit"});
+    defer alloc.free(result.text);
+    if (!result.ok) return sendError(stream, 500, "delete_failed", result.text);
+    removeAgentSession(alloc, dir, name);
+    return sendJson(stream, 200, "{\"deleted\":true}\n");
+}
+
+fn handleInput(
+    alloc: std.mem.Allocator,
+    stream: std.net.Stream,
+    workspace: ?[]const u8,
+    want: []const u8,
+    body: []const u8,
+) !void {
+    var parsed = std.json.parseFromSlice(std.json.Value, alloc, body, .{}) catch
+        return sendError(stream, 400, "bad_json", "request body must be JSON");
+    defer parsed.deinit();
+    var payload: std.ArrayList(u8) = .empty;
+    defer payload.deinit(alloc);
+    if (jsonString(parsed.value, "text")) |text| try payload.appendSlice(alloc, text);
+    if (jsonString(parsed.value, "base64")) |encoded| {
+        const size = std.base64.standard.Decoder.calcSizeForSlice(encoded) catch
+            return sendError(stream, 400, "bad_base64", "base64 input is invalid");
+        const start = payload.items.len;
+        try payload.resize(alloc, start + size);
+        std.base64.standard.Decoder.decode(payload.items[start..], encoded) catch
+            return sendError(stream, 400, "bad_base64", "base64 input is invalid");
+    }
+    if (jsonString(parsed.value, "key")) |key_name| {
+        if (!appendKey(alloc, &payload, key_name)) {
+            return sendError(stream, 400, "bad_key", "unknown key");
+        }
+    }
+    if (parsed.value == .object) {
+        if (parsed.value.object.get("keys")) |value| switch (value) {
+            .array => |arr| for (arr.items) |item| {
+                const key_name = switch (item) {
+                    .string => |s| s,
+                    else => return sendError(stream, 400, "bad_key", "keys must be strings"),
+                };
+                if (!appendKey(alloc, &payload, key_name)) return sendError(stream, 400, "bad_key", "unknown key");
+            },
+            else => return sendError(stream, 400, "bad_key", "keys must be an array"),
+        };
+    }
+    if (jsonBool(parsed.value, "enter") orelse false) try payload.append(alloc, '\r');
+    if (payload.items.len == 0) return sendError(stream, 400, "empty_input", "nothing to send");
+    if (std.mem.indexOfScalar(u8, payload.items, 0) != null) {
+        return sendError(stream, 400, "nul_input", "NUL bytes are not supported by v1 input");
+    }
+
+    const dir = try workspaceDirHttp(alloc, workspace);
+    defer alloc.free(dir);
+    const name = resolveSessionResult(alloc, dir, want) catch |err| return sendResolveError(stream, err);
+    defer alloc.free(name);
+    const result = try controlSession(alloc, dir, name, &.{ "send", payload.items });
+    defer alloc.free(result.text);
+    if (!result.ok) return sendError(stream, 500, "input_failed", result.text);
+    return sendJson(stream, 200, "{\"sent\":true}\n");
+}
+
+fn handleScreen(
+    alloc: std.mem.Allocator,
+    stream: std.net.Stream,
+    workspace: ?[]const u8,
+    want: []const u8,
+    query: []const u8,
+) !void {
+    const scrollback = if (queryParam(query, "scrollback")) |v|
+        std.mem.eql(u8, v, "true") or std.mem.eql(u8, v, "1")
+    else
+        false;
+    const dir = try workspaceDirHttp(alloc, workspace);
+    defer alloc.free(dir);
+    const name = resolveSessionResult(alloc, dir, want) catch |err| return sendResolveError(stream, err);
+    defer alloc.free(name);
+    const result = try controlSession(alloc, dir, name, &.{ "peek", if (scrollback) "scrollback" else "screen" });
+    defer alloc.free(result.text);
+    if (!result.ok) return sendError(stream, 500, "screen_failed", result.text);
+    const peek = parsePeek(result.text) orelse return sendError(stream, 500, "bad_daemon_response", "malformed screen response");
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(alloc);
+    try out.appendSlice(alloc, "{\"session\":");
+    try appendJsonString(alloc, &out, name);
+    try out.appendSlice(alloc, ",\"title\":");
+    try appendJsonString(alloc, &out, peek.title);
+    try out.print(alloc, ",\"rows\":{d},\"cols\":{d},\"cursor\":{{\"row\":{d},\"col\":{d}}},\"screen\":", .{
+        peek.rows,
+        peek.cols,
+        peek.cursor_row,
+        peek.cursor_col,
+    });
+    try appendJsonString(alloc, &out, peek.screen);
+    try out.appendSlice(alloc, "}\n");
+    return sendOwnedJson(alloc, stream, 200, &out);
+}
+
+fn handleWait(
+    alloc: std.mem.Allocator,
+    stream: std.net.Stream,
+    workspace: ?[]const u8,
+    want: []const u8,
+    body: []const u8,
+) !void {
+    var parsed = std.json.parseFromSlice(std.json.Value, alloc, body, .{}) catch
+        return sendError(stream, 400, "bad_json", "request body must be JSON");
+    defer parsed.deinit();
+    const text = jsonString(parsed.value, "text");
+    const idle = jsonBool(parsed.value, "idle") orelse false;
+    if ((text != null) == idle) return sendError(stream, 400, "bad_wait", "set exactly one of text or idle");
+    const timeout_text = jsonString(parsed.value, "timeout") orelse "30s";
+    const timeout_ms = parseDurationMs(timeout_text) orelse
+        return sendError(stream, 400, "bad_timeout", "bad timeout duration");
+
+    const dir = try workspaceDirHttp(alloc, workspace);
+    defer alloc.free(dir);
+    const name = resolveSessionResult(alloc, dir, want) catch |err| return sendResolveError(stream, err);
+    defer alloc.free(name);
+    const deadline = std.time.milliTimestamp() + @as(i64, @intCast(timeout_ms));
+    while (true) {
+        if (text) |needle| {
+            const result = try controlSession(alloc, dir, name, &.{ "peek", "screen" });
+            defer alloc.free(result.text);
+            if (!result.ok) return sendError(stream, 500, "wait_failed", result.text);
+            const peek = parsePeek(result.text) orelse return sendError(stream, 500, "bad_daemon_response", "malformed screen response");
+            if (std.mem.indexOf(u8, peek.screen, needle) != null) {
+                return sendJson(stream, 200, "{\"matched\":true}\n");
+            }
+        } else {
+            const info = try sessionInfo(alloc, dir, name) orelse
+                return sendError(stream, 404, "not_found", "session not found");
+            defer alloc.free(info.text);
+            if (info.out_idle_ms >= idle_settle_ms) return sendJson(stream, 200, "{\"idle\":true}\n");
+        }
+        if (std.time.milliTimestamp() >= deadline) {
+            return sendError(stream, 408, "timeout", "wait timed out");
+        }
+        std.Thread.sleep(50 * std.time.ns_per_ms);
+    }
+}
+
+fn handleTranscript(
+    alloc: std.mem.Allocator,
+    stream: std.net.Stream,
+    workspace: ?[]const u8,
+    want: []const u8,
+) !void {
+    const dir = try workspaceDirHttp(alloc, workspace);
+    defer alloc.free(dir);
+    const name = resolveSessionResult(alloc, dir, want) catch |err| return sendResolveError(stream, err);
+    defer alloc.free(name);
+    const body = liveTranscriptJson(alloc, dir, name, false) catch |err| switch (err) {
+        error.NotAgent => return sendError(stream, 404, "not_agent", "session was not started with --agent"),
+        error.BadSidecar => return sendError(stream, 500, "bad_sidecar", "corrupt agent sidecar"),
+        else => return err,
+    };
+    defer alloc.free(body);
+    return sendJson(stream, 200, body);
+}
+
+fn liveTranscriptJson(alloc: std.mem.Allocator, dir: []const u8, name: []const u8, thinking: bool) ![]u8 {
+    const sc_path = try paths.sidecarPath(alloc, dir, name);
+    defer alloc.free(sc_path);
+    const sc_data = readTranscript(alloc, sc_path) orelse return error.NotAgent;
+    defer alloc.free(sc_data);
+    const sc = harness.Sidecar.fromJson(alloc, sc_data) catch return error.BadSidecar;
+    defer sc.deinit(alloc);
+
+    const t_path = sc.agent.transcriptPath(alloc, sc) catch null;
+    defer if (t_path) |p| alloc.free(p);
+    const data = if (t_path) |p| (readTranscript(alloc, p) orelse try alloc.dupe(u8, "")) else try alloc.dupe(u8, "");
+    defer alloc.free(data);
+    var report = try sc.agent.detect(alloc, data);
+    defer report.deinit(alloc);
+
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(alloc);
+    try out.appendSlice(alloc, "{\"session\":");
+    try appendJsonString(alloc, &out, name);
+    try out.appendSlice(alloc, ",\"agent\":");
+    try appendJsonString(alloc, &out, sc.agent.id());
+    try out.appendSlice(alloc, ",\"state\":");
+    try appendJsonString(alloc, &out, report.state.asStr());
+    if (report.stop_reason) |s| {
+        try out.appendSlice(alloc, ",\"stop_reason\":");
+        try appendJsonString(alloc, &out, s);
+    }
+    if (report.detail) |d| {
+        try out.appendSlice(alloc, ",\"detail\":");
+        try appendJsonString(alloc, &out, d);
+    }
+    try out.print(alloc, ",\"messages\":{d},\"transcript\":", .{report.messages});
+    const arr = try sc.agent.dumpJson(alloc, data, thinking);
+    defer alloc.free(arr);
+    try out.appendSlice(alloc, std.mem.trimRight(u8, arr, " \n"));
+    try out.appendSlice(alloc, "}\n");
+    return out.toOwnedSlice(alloc);
+}
+
+fn handleEvents(
+    alloc: std.mem.Allocator,
+    stream: std.net.Stream,
+    workspace: ?[]const u8,
+    want: []const u8,
+    query: []const u8,
+) !void {
+    const since = if (queryParam(query, "since")) |v| std.fmt.parseInt(u64, v, 10) catch 0 else 0;
+    const timeout_ms = if (queryParam(query, "timeout")) |v| parseDurationMs(v) orelse 0 else 0;
+    const dir = try workspaceDirHttp(alloc, workspace);
+    defer alloc.free(dir);
+    const name = resolveSessionResult(alloc, dir, want) catch |err| return sendResolveError(stream, err);
+    defer alloc.free(name);
+    const deadline = std.time.milliTimestamp() + @as(i64, @intCast(timeout_ms));
+    while (true) {
+        const state = try sessionState(alloc, dir, name) orelse
+            return sendError(stream, 404, "not_found", "session not found");
+        defer alloc.free(state.text);
+        if (since == 0 or state.event_seq > since or since > state.event_seq) {
+            var out: std.ArrayList(u8) = .empty;
+            defer out.deinit(alloc);
+            try out.print(alloc, "{{\"cursor\":{d},\"events\":[", .{state.event_seq});
+            if (since == 0 or state.event_seq > since) {
+                try out.appendSlice(alloc, "{\"type\":\"session_state\",\"cursor\":");
+                try out.print(alloc, "{d}", .{state.event_seq});
+                try out.appendSlice(alloc, ",\"title\":");
+                try appendJsonString(alloc, &out, state.title);
+                try out.append(alloc, '}');
+            }
+            try out.appendSlice(alloc, "]");
+            if (since > state.event_seq) try out.appendSlice(alloc, ",\"stale\":true");
+            try out.appendSlice(alloc, "}\n");
+            return sendOwnedJson(alloc, stream, 200, &out);
+        }
+        if (std.time.milliTimestamp() >= deadline) {
+            var out: std.ArrayList(u8) = .empty;
+            defer out.deinit(alloc);
+            try out.print(alloc, "{{\"cursor\":{d},\"events\":[],\"timed_out\":true}}\n", .{since});
+            return sendOwnedJson(alloc, stream, 200, &out);
+        }
+        std.Thread.sleep(50 * std.time.ns_per_ms);
+    }
+}
+
+fn sessionState(alloc: std.mem.Allocator, dir: []const u8, name: []const u8) !?SessionState {
+    const result = controlSession(alloc, dir, name, &.{"state"}) catch |err| switch (err) {
+        error.NoSession => return null,
+        else => return err,
+    };
+    errdefer alloc.free(result.text);
+    if (!result.ok) return error.BadResponse;
+    var rest: []const u8 = result.text;
+    _ = cutTab(&rest) orelse return error.BadResponse;
+    const attached = std.mem.eql(u8, cutTab(&rest) orelse return error.BadResponse, "Attached");
+    const idle_ms = std.fmt.parseInt(i64, cutTab(&rest) orelse return error.BadResponse, 10) catch
+        return error.BadResponse;
+    const out_idle_ms = std.fmt.parseInt(i64, cutTab(&rest) orelse return error.BadResponse, 10) catch
+        return error.BadResponse;
+    const rows = std.fmt.parseInt(u32, cutTab(&rest) orelse return error.BadResponse, 10) catch
+        return error.BadResponse;
+    const cols = std.fmt.parseInt(u32, cutTab(&rest) orelse return error.BadResponse, 10) catch
+        return error.BadResponse;
+    const event_seq = std.fmt.parseInt(u64, cutTab(&rest) orelse return error.BadResponse, 10) catch
+        return error.BadResponse;
+    return .{
+        .text = result.text,
+        .attached = attached,
+        .idle_ms = idle_ms,
+        .out_idle_ms = out_idle_ms,
+        .rows = rows,
+        .cols = cols,
+        .event_seq = event_seq,
+        .title = rest,
+    };
+}
+
+fn queryParam(query: []const u8, key: []const u8) ?[]const u8 {
+    var it = std.mem.splitScalar(u8, query, '&');
+    while (it.next()) |part| {
+        const eq = std.mem.indexOfScalar(u8, part, '=') orelse continue;
+        if (std.mem.eql(u8, part[0..eq], key)) return part[eq + 1 ..];
+    }
+    return null;
+}
+
+fn jsonString(root: std.json.Value, key: []const u8) ?[]const u8 {
+    if (root != .object) return null;
+    const value = root.object.get(key) orelse return null;
+    return switch (value) {
+        .string => |s| s,
+        else => null,
+    };
+}
+
+fn jsonBool(root: std.json.Value, key: []const u8) ?bool {
+    if (root != .object) return null;
+    const value = root.object.get(key) orelse return null;
+    return switch (value) {
+        .bool => |b| b,
+        else => null,
+    };
+}
+
+fn jsonU16(root: std.json.Value, key: []const u8) ?u16 {
+    if (root != .object) return null;
+    const value = root.object.get(key) orelse return null;
+    return switch (value) {
+        .integer => |n| if (n > 0 and n <= std.math.maxInt(u16)) @intCast(n) else null,
+        else => null,
+    };
+}
+
+fn sendResolveError(stream: std.net.Stream, err: anyerror) !void {
+    return switch (err) {
+        error.NoSession => sendError(stream, 404, "not_found", "session not found"),
+        error.AmbiguousSession => sendError(stream, 409, "ambiguous_session", "session prefix is ambiguous"),
+        else => err,
+    };
+}
+
+fn sendOwnedJson(
+    alloc: std.mem.Allocator,
+    stream: std.net.Stream,
+    status: u16,
+    out: *std.ArrayList(u8),
+) !void {
+    const body = try out.toOwnedSlice(alloc);
+    defer alloc.free(body);
+    return sendJson(stream, status, body);
+}
+
+fn sendError(stream: std.net.Stream, status: u16, code: []const u8, message: []const u8) !void {
+    const alloc = std.heap.c_allocator;
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(alloc);
+    try out.appendSlice(alloc, "{\"error\":{\"code\":");
+    try appendJsonString(alloc, &out, code);
+    try out.appendSlice(alloc, ",\"message\":");
+    try appendJsonString(alloc, &out, message);
+    try out.appendSlice(alloc, "}}\n");
+    return sendJson(stream, status, out.items);
+}
+
+fn sendJson(stream: std.net.Stream, status: u16, body: []const u8) !void {
+    var header_buf: [256]u8 = undefined;
+    const status_text = switch (status) {
+        200 => "OK",
+        201 => "Created",
+        400 => "Bad Request",
+        401 => "Unauthorized",
+        404 => "Not Found",
+        408 => "Request Timeout",
+        409 => "Conflict",
+        500 => "Internal Server Error",
+        else => "OK",
+    };
+    const header = try std.fmt.bufPrint(
+        &header_buf,
+        "HTTP/1.1 {d} {s}\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n",
+        .{ status, status_text, body.len },
+    );
+    try stream.writeAll(header);
+    try stream.writeAll(body);
+}
+
 fn cmdVersion(alloc: std.mem.Allocator) !void {
     try stdoutPrint(alloc, "moo {s}\n", .{version});
 }
@@ -1352,6 +2288,8 @@ fn runDaemon(
     listen_fd: posix.fd_t,
     argv: []const []const u8,
     env_overrides: []const [2][]const u8,
+    rows: u16,
+    cols: u16,
 ) noreturn {
     _ = posix.setsid() catch {};
 
@@ -1379,6 +2317,8 @@ fn runDaemon(
         .listen_fd = listen_fd,
         .argv = argv,
         .env_overrides = env_overrides,
+        .rows = rows,
+        .cols = cols,
     }) catch |err| {
         std.log.err("daemon failed: {}", .{err});
         posix.exit(1);

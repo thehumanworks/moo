@@ -170,12 +170,18 @@ const Harness = struct {
 
     fn waitSessionUp(self: *Harness, session: []const u8) !void {
         var deadline = Deadline.init(default_timeout_ms);
+        var last_err: ?[]u8 = null;
+        defer if (last_err) |e| self.alloc.free(e);
         while (true) {
             const result = try self.run(&.{ "peek", session });
             defer self.alloc.free(result.stdout);
-            defer self.alloc.free(result.stderr);
+            if (last_err) |e| self.alloc.free(e);
+            last_err = result.stderr;
             if (result.term == .Exited and result.term.Exited == 0) return;
-            try deadline.tick("session did not come up");
+            deadline.tick("session did not come up") catch |err| {
+                std.debug.print("--- last peek stderr for {s} ---\n{s}\n---\n", .{ session, last_err orelse "" });
+                return err;
+            };
         }
     }
 
@@ -224,6 +230,182 @@ const Deadline = struct {
         std.Thread.sleep(25 * std.time.ns_per_ms);
     }
 };
+
+const ApiResponse = struct {
+    status: u16,
+    body: []u8,
+
+    fn deinit(self: ApiResponse, alloc: std.mem.Allocator) void {
+        alloc.free(self.body);
+    }
+};
+
+const ApiServer = struct {
+    alloc: std.mem.Allocator,
+    child: std.process.Child,
+    port: u16,
+    token: ?[]const u8 = null,
+
+    fn start(h: *Harness, token: ?[]const u8) !ApiServer {
+        const alloc = h.alloc;
+        var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const exe_abs = try std.fs.cwd().realpath(exe_path, &exe_buf);
+        var argv: std.ArrayList([]const u8) = .empty;
+        defer argv.deinit(alloc);
+        try argv.appendSlice(alloc, &.{ exe_abs, "serve", "--addr", "127.0.0.1:0" });
+        if (token != null) try argv.appendSlice(alloc, &.{ "--token-env", "MOO_TEST_API_TOKEN" });
+
+        var env = try std.process.getEnvMap(alloc);
+        defer env.deinit();
+        env.remove("MOO");
+        env.remove("MOO_FOREGROUND");
+        env.remove("MOO_LOG");
+        env.remove("MOO_WORKSPACE");
+        try env.put("MOO_DIR", h.dir);
+        if (token) |t| try env.put("MOO_TEST_API_TOKEN", t);
+
+        var child = std.process.Child.init(argv.items, alloc);
+        child.env_map = &env;
+        child.stdin_behavior = .Ignore;
+        child.stdout_behavior = .Pipe;
+        child.stderr_behavior = .Inherit;
+        try child.spawn();
+        errdefer _ = child.kill() catch {};
+
+        const line = try readReadyLine(alloc, child.stdout.?);
+        defer alloc.free(line);
+        const port = parseReadyPort(line) orelse return error.BadReadyLine;
+        return .{ .alloc = alloc, .child = child, .port = port, .token = token };
+    }
+
+    fn deinit(self: *ApiServer) void {
+        posix.kill(self.child.id, posix.SIG.KILL) catch {};
+        var status: c_int = undefined;
+        _ = std.c.waitpid(self.child.id, &status, 0);
+        if (self.child.stdout) |file| file.close();
+    }
+
+    fn request(
+        self: *ApiServer,
+        method: []const u8,
+        path: []const u8,
+        body: []const u8,
+        auth: ?[]const u8,
+    ) !ApiResponse {
+        const stream = try std.net.tcpConnectToHost(self.alloc, "127.0.0.1", self.port);
+        defer stream.close();
+
+        const auth_header = if (auth) |token|
+            try std.fmt.allocPrint(self.alloc, "Authorization: Bearer {s}\r\n", .{token})
+        else
+            try self.alloc.dupe(u8, "");
+        defer self.alloc.free(auth_header);
+        const req = try std.fmt.allocPrint(
+            self.alloc,
+            "{s} {s} HTTP/1.1\r\nHost: 127.0.0.1:{d}\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nConnection: close\r\n{s}\r\n{s}",
+            .{ method, path, self.port, body.len, auth_header, body },
+        );
+        defer self.alloc.free(req);
+        try stream.writeAll(req);
+
+        var raw: std.ArrayList(u8) = .empty;
+        errdefer raw.deinit(self.alloc);
+        var buf: [4096]u8 = undefined;
+        var header_end: ?usize = null;
+        var deadline = Deadline.init(default_timeout_ms);
+        while (true) {
+            const n = try readHttpChunk(stream, &buf, &deadline);
+            if (n == 0) return error.BadHttpResponse;
+            try raw.appendSlice(self.alloc, buf[0..n]);
+            if (std.mem.indexOf(u8, raw.items, "\r\n\r\n")) |idx| {
+                header_end = idx;
+                break;
+            }
+        }
+        const bytes = raw.items;
+        const headers_end = header_end.?;
+        const status = parseStatus(bytes[0..headers_end]) orelse return error.BadHttpResponse;
+        const content_len = responseContentLength(bytes[0..headers_end]) orelse return error.BadHttpResponse;
+        const body_start = headers_end + 4;
+        while (raw.items.len < body_start + content_len) {
+            const n = try readHttpChunk(stream, &buf, &deadline);
+            if (n == 0) return error.BadHttpResponse;
+            try raw.appendSlice(self.alloc, buf[0..n]);
+        }
+        const body_bytes = try self.alloc.dupe(u8, raw.items[body_start .. body_start + content_len]);
+        raw.deinit(self.alloc);
+        return .{ .status = status, .body = body_bytes };
+    }
+};
+
+fn readHttpChunk(stream: std.net.Stream, buf: []u8, deadline: *Deadline) !usize {
+    while (true) {
+        var fds = [_]posix.pollfd{.{ .fd = stream.handle, .events = posix.POLL.IN, .revents = 0 }};
+        const ready = try posix.poll(&fds, 100);
+        if (ready != 0) return stream.read(buf);
+        try deadline.tick("api response did not complete");
+    }
+}
+
+fn readReadyLine(alloc: std.mem.Allocator, file: std.fs.File) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(alloc);
+    var deadline = Deadline.init(default_timeout_ms);
+    var buf: [128]u8 = undefined;
+    while (true) {
+        if (std.mem.indexOfScalar(u8, out.items, '\n')) |_| return out.toOwnedSlice(alloc);
+        var fds = [_]posix.pollfd{.{ .fd = file.handle, .events = posix.POLL.IN, .revents = 0 }};
+        const ready = try posix.poll(&fds, 100);
+        if (ready != 0) {
+            const n = try file.read(&buf);
+            if (n == 0) return error.ServerExited;
+            try out.appendSlice(alloc, buf[0..n]);
+        }
+        try deadline.tick("api server did not report readiness");
+    }
+}
+
+fn parseReadyPort(line: []const u8) ?u16 {
+    const colon = std.mem.lastIndexOfScalar(u8, line, ':') orelse return null;
+    const tail = std.mem.trimRight(u8, line[colon + 1 ..], " \r\n");
+    return std.fmt.parseInt(u16, tail, 10) catch null;
+}
+
+fn parseStatus(headers: []const u8) ?u16 {
+    const line_end = std.mem.indexOf(u8, headers, "\r\n") orelse headers.len;
+    const line = headers[0..line_end];
+    var parts = std.mem.splitScalar(u8, line, ' ');
+    _ = parts.next() orelse return null;
+    const code = parts.next() orelse return null;
+    return std.fmt.parseInt(u16, code, 10) catch null;
+}
+
+fn responseContentLength(headers: []const u8) ?usize {
+    var lines = std.mem.splitSequence(u8, headers, "\r\n");
+    _ = lines.next();
+    while (lines.next()) |line| {
+        const colon = std.mem.indexOfScalar(u8, line, ':') orelse continue;
+        const name = std.mem.trim(u8, line[0..colon], " \t");
+        if (!std.ascii.eqlIgnoreCase(name, "Content-Length")) continue;
+        const value = std.mem.trim(u8, line[colon + 1 ..], " \t");
+        return std.fmt.parseInt(usize, value, 10) catch null;
+    }
+    return null;
+}
+
+fn expectStatus(resp: ApiResponse, status: u16) !void {
+    if (resp.status != status) {
+        std.debug.print("wanted HTTP {d}, got {d}: {s}\n", .{ status, resp.status, resp.body });
+        return error.UnexpectedStatus;
+    }
+}
+
+fn expectBodyContains(resp: ApiResponse, needle: []const u8) !void {
+    if (std.mem.indexOf(u8, resp.body, needle) == null) {
+        std.debug.print("HTTP body missing {s}: {s}\n", .{ needle, resp.body });
+        return error.MissingBodyNeedle;
+    }
+}
 
 /// A moo client process running on a real PTY owned by the test.
 const PtyClient = struct {
@@ -1472,6 +1654,259 @@ test "rename: moves a session to a new name" {
     try h.runExit(&.{ "rename", "nosuchzz", "x" }, 3);
     try h.runExit(&.{"rename"}, 2);
     try h.runExit(&.{ "rename", "after" }, 2);
+}
+
+test "http api: serve lifecycle" {
+    const alloc = std.testing.allocator;
+    var h = try Harness.init(alloc);
+    defer h.deinit();
+    var api = try ApiServer.start(&h, null);
+    defer api.deinit();
+
+    const health = try api.request("GET", "/v1/health", "", null);
+    defer health.deinit(alloc);
+    try expectStatus(health, 200);
+    try expectBodyContains(health, "\"ok\":true");
+
+    const workspaces = try api.request("GET", "/v1/workspaces", "", null);
+    defer workspaces.deinit(alloc);
+    try expectStatus(workspaces, 200);
+    try expectBodyContains(workspaces, "\"workspace\":\"\"");
+}
+
+test "http api: workspace session management" {
+    const alloc = std.testing.allocator;
+    var h = try Harness.init(alloc);
+    defer h.deinit();
+    var api = try ApiServer.start(&h, null);
+    defer api.deinit();
+
+    const created = try api.request(
+        "POST",
+        "/v1/workspaces/proj/sessions",
+        "{\"name\":\"api\",\"command\":[\"cat\"]}",
+        null,
+    );
+    defer created.deinit(alloc);
+    try expectStatus(created, 201);
+    try expectBodyContains(created, "\"session\":\"api\"");
+
+    const proj = try api.request("GET", "/v1/workspaces/proj/sessions", "", null);
+    defer proj.deinit(alloc);
+    try expectStatus(proj, 200);
+    try expectBodyContains(proj, "\"name\":\"api\"");
+
+    const default_ws = try api.request("GET", "/v1/workspaces/@default/sessions", "", null);
+    defer default_ws.deinit(alloc);
+    try expectStatus(default_ws, 200);
+    try std.testing.expect(std.mem.indexOf(u8, default_ws.body, "\"name\":\"api\"") == null);
+
+    const renamed = try api.request(
+        "PATCH",
+        "/v1/workspaces/proj/sessions/api",
+        "{\"name\":\"api2\"}",
+        null,
+    );
+    defer renamed.deinit(alloc);
+    try expectStatus(renamed, 200);
+    try expectBodyContains(renamed, "\"renamed\":true");
+
+    const inspected = try api.request("GET", "/v1/workspaces/proj/sessions/api2", "", null);
+    defer inspected.deinit(alloc);
+    try expectStatus(inspected, 200);
+    try expectBodyContains(inspected, "\"name\":\"api2\"");
+
+    const deleted = try api.request("DELETE", "/v1/workspaces/proj/sessions/api2", "", null);
+    defer deleted.deinit(alloc);
+    try expectStatus(deleted, 200);
+
+    const missing = try api.request("GET", "/v1/workspaces/proj/sessions/api2", "", null);
+    defer missing.deinit(alloc);
+    try expectStatus(missing, 404);
+}
+
+test "http api: drive wait screen" {
+    const alloc = std.testing.allocator;
+    var h = try Harness.init(alloc);
+    defer h.deinit();
+    var api = try ApiServer.start(&h, null);
+    defer api.deinit();
+
+    const created = try api.request(
+        "POST",
+        "/v1/workspaces/@default/sessions",
+        "{\"name\":\"drv\",\"argv\":[\"cat\"],\"rows\":12,\"cols\":40}",
+        null,
+    );
+    defer created.deinit(alloc);
+    try expectStatus(created, 201);
+
+    var attached = try PtyClient.spawn(&h, &.{ "attach", "drv" }, 12, 40);
+    defer attached.deinit();
+    try attached.waitFor("\x1b[H\x1b[2J");
+
+    const input = try api.request(
+        "POST",
+        "/v1/workspaces/@default/sessions/drv/input",
+        "{\"text\":\"http-drive\",\"enter\":true}",
+        null,
+    );
+    defer input.deinit(alloc);
+    try expectStatus(input, 200);
+    try attached.waitFor("http-drive");
+
+    const waited = try api.request(
+        "POST",
+        "/v1/workspaces/@default/sessions/drv/wait",
+        "{\"text\":\"http-drive\",\"timeout\":\"5s\"}",
+        null,
+    );
+    defer waited.deinit(alloc);
+    try expectStatus(waited, 200);
+
+    const resized = try api.request(
+        "POST",
+        "/v1/workspaces/@default/sessions/drv/resize",
+        "{\"rows\":13,\"cols\":41}",
+        null,
+    );
+    defer resized.deinit(alloc);
+    try expectStatus(resized, 200);
+
+    const resized_screen = try api.request("GET", "/v1/workspaces/@default/sessions/drv/screen", "", null);
+    defer resized_screen.deinit(alloc);
+    try expectStatus(resized_screen, 200);
+    try expectBodyContains(resized_screen, "\"rows\":13");
+    try expectBodyContains(resized_screen, "\"cols\":41");
+    try expectBodyContains(resized_screen, "http-drive");
+
+    try attached.send("\x01d");
+    try attached.waitFor("detached from drv");
+    try std.testing.expectEqual(@as(u32, 0), try attached.waitExit());
+}
+
+test "http api: agent transcript" {
+    const alloc = std.testing.allocator;
+    var h = try Harness.init(alloc);
+    defer h.deinit();
+    var api = try ApiServer.start(&h, null);
+    defer api.deinit();
+
+    const created = try api.request(
+        "POST",
+        "/v1/workspaces/@default/sessions",
+        "{\"name\":\"aghttp\",\"agent\":\"claude\",\"argv\":[\"sh\",\"-c\",\"cat\"]}",
+        null,
+    );
+    defer created.deinit(alloc);
+    try expectStatus(created, 201);
+
+    const transcript = try api.request("GET", "/v1/workspaces/@default/sessions/aghttp/transcript", "", null);
+    defer transcript.deinit(alloc);
+    try expectStatus(transcript, 200);
+    try expectBodyContains(transcript, "\"agent\":\"claude\"");
+    try expectBodyContains(transcript, "\"transcript\":[]");
+
+    const cli = try h.run(&.{ "new", "cliag", "--agent", "claude", "-d", "--", "sh", "-c", "cat" });
+    defer alloc.free(cli.stdout);
+    defer alloc.free(cli.stderr);
+    try std.testing.expect(cli.term.Exited == 0);
+    try h.waitSessionUp("cliag");
+
+    const cli_transcript = try api.request("GET", "/v1/workspaces/@default/sessions/cliag/transcript", "", null);
+    defer cli_transcript.deinit(alloc);
+    try expectStatus(cli_transcript, 200);
+    try expectBodyContains(cli_transcript, "\"session\":\"cliag\"");
+}
+
+test "http api: event cursors" {
+    const alloc = std.testing.allocator;
+    var h = try Harness.init(alloc);
+    defer h.deinit();
+    var api = try ApiServer.start(&h, null);
+    defer api.deinit();
+
+    const created = try api.request(
+        "POST",
+        "/v1/workspaces/@default/sessions",
+        "{\"name\":\"ev\",\"argv\":[\"cat\"]}",
+        null,
+    );
+    defer created.deinit(alloc);
+    try expectStatus(created, 201);
+
+    const first = try api.request("GET", "/v1/workspaces/@default/sessions/ev/events?since=0&timeout=1ms", "", null);
+    defer first.deinit(alloc);
+    try expectStatus(first, 200);
+    try expectBodyContains(first, "\"events\":[");
+    const cursor = try cursorFromBody(first.body);
+
+    const quiet_path = try std.fmt.allocPrint(alloc, "/v1/workspaces/@default/sessions/ev/events?since={d}&timeout=50ms", .{cursor});
+    defer alloc.free(quiet_path);
+    const quiet = try api.request("GET", quiet_path, "", null);
+    defer quiet.deinit(alloc);
+    try expectStatus(quiet, 200);
+    try expectBodyContains(quiet, "\"timed_out\":true");
+
+    const input = try api.request(
+        "POST",
+        "/v1/workspaces/@default/sessions/ev/input",
+        "{\"text\":\"event-mark\",\"enter\":true}",
+        null,
+    );
+    defer input.deinit(alloc);
+    try expectStatus(input, 200);
+
+    const changed_path = try std.fmt.allocPrint(alloc, "/v1/workspaces/@default/sessions/ev/events?since={d}&timeout=5s", .{cursor});
+    defer alloc.free(changed_path);
+    const changed = try api.request("GET", changed_path, "", null);
+    defer changed.deinit(alloc);
+    try expectStatus(changed, 200);
+    const next_cursor = try cursorFromBody(changed.body);
+    try std.testing.expect(next_cursor > cursor);
+}
+
+test "http api: auth and bind safety" {
+    const alloc = std.testing.allocator;
+    var h = try Harness.init(alloc);
+    defer h.deinit();
+
+    try h.runExit(&.{ "serve", "--addr", "0.0.0.0:0" }, 2);
+
+    var api = try ApiServer.start(&h, "secret-token");
+    defer api.deinit();
+
+    const unauthorized = try api.request(
+        "POST",
+        "/v1/workspaces/@default/sessions",
+        "{\"name\":\"nope\",\"argv\":[\"cat\"]}",
+        null,
+    );
+    defer unauthorized.deinit(alloc);
+    try expectStatus(unauthorized, 401);
+    const sessions_after_unauth = try h.run(&.{"ls"});
+    defer alloc.free(sessions_after_unauth.stdout);
+    defer alloc.free(sessions_after_unauth.stderr);
+    try std.testing.expect(std.mem.indexOf(u8, sessions_after_unauth.stdout, "nope") == null);
+
+    const bad = try api.request("GET", "/v1/workspaces/@default/sessions", "", "bad-token");
+    defer bad.deinit(alloc);
+    try expectStatus(bad, 401);
+
+    const created = try api.request(
+        "POST",
+        "/v1/workspaces/@default/sessions",
+        "{\"name\":\"yes\",\"argv\":[\"cat\"]}",
+        "secret-token",
+    );
+    defer created.deinit(alloc);
+    try expectStatus(created, 201);
+}
+
+fn cursorFromBody(body: []const u8) !u64 {
+    var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, body, .{});
+    defer parsed.deinit();
+    return @intCast(parsed.value.object.get("cursor").?.integer);
 }
 
 // -- workspaces ---------------------------------------------------------------
