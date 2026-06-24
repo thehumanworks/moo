@@ -13,6 +13,7 @@ const protocol = @import("protocol.zig");
 const ui = @import("ui.zig");
 
 pub const version = "0.5.20";
+const mcp_server_exe = "moo-mcp-server";
 
 var session_child_close_fd: posix.fd_t = -1;
 
@@ -99,6 +100,7 @@ pub fn main() !void {
     if (eql(cmd, "kill")) return cmdKill(alloc, rest);
     if (eql(cmd, "rename")) return cmdRename(alloc, rest);
     if (eql(cmd, "serve")) return cmdServe(alloc, rest);
+    if (eql(cmd, "mcp")) return cmdMcp(alloc, rest);
     if (eql(cmd, "version") or eql(cmd, "-V") or eql(cmd, "--version")) return cmdVersion(alloc);
     if (eql(cmd, "help") or eql(cmd, "-h") or eql(cmd, "--help")) return cmdHelp(alloc, rest);
     fail(exit_usage, "unknown command '{s}' (run 'moo help')", .{cmd});
@@ -153,6 +155,60 @@ fn workspaceDirForActive(comptime cmd: []const u8, alloc: std.mem.Allocator, ws:
 fn printHelpPage(name: []const u8) !void {
     const entry = help.find(name) orelse unreachable;
     try stdoutWrite(entry.body);
+}
+
+fn cmdMcp(alloc: std.mem.Allocator, args: []const [:0]const u8) !void {
+    if (args.len > 0 and isHelpFlag(args[0])) return printHelpPage("mcp");
+    const server = findMcpServer(alloc) catch |err| switch (err) {
+        error.FileNotFound => fail(exit_runtime, "cannot find bundled {s}; rebuild or set MOO_MCP_SERVER_BIN", .{mcp_server_exe}),
+        else => return err,
+    };
+    defer alloc.free(server);
+
+    var argv = try alloc.alloc([]const u8, args.len + 1);
+    defer alloc.free(argv);
+    argv[0] = server;
+    for (args, 0..) |arg, idx| argv[idx + 1] = arg;
+
+    var child = std.process.Child.init(argv, alloc);
+    child.stdin_behavior = .Inherit;
+    child.stdout_behavior = .Inherit;
+    child.stderr_behavior = .Inherit;
+    const term = child.spawnAndWait() catch |err| {
+        fail(exit_runtime, "failed to run {s}: {}", .{ server, err });
+    };
+    exitWithChildTerm(term);
+}
+
+fn findMcpServer(alloc: std.mem.Allocator) ![]u8 {
+    if (posix.getenv("MOO_MCP_SERVER_BIN")) |path| return alloc.dupe(u8, path);
+
+    const self_path = try std.fs.selfExePathAlloc(alloc);
+    defer alloc.free(self_path);
+    if (std.fs.path.dirname(self_path)) |dir| {
+        const sibling = try std.fs.path.join(alloc, &.{ dir, mcp_server_exe });
+        if (fileExists(sibling)) return sibling;
+        alloc.free(sibling);
+    }
+
+    const dev = try std.fs.path.join(alloc, &.{ "zig-out", "bin", mcp_server_exe });
+    if (fileExists(dev)) return dev;
+    alloc.free(dev);
+
+    return error.FileNotFound;
+}
+
+fn fileExists(path: []const u8) bool {
+    std.fs.cwd().access(path, .{}) catch return false;
+    return true;
+}
+
+fn exitWithChildTerm(term: std.process.Child.Term) noreturn {
+    switch (term) {
+        .Exited => |code| posix.exit(@intCast(@min(code, 255))),
+        .Signal => |sig| posix.exit(@intCast(@min(128 + sig, 255))),
+        else => posix.exit(exit_runtime),
+    }
 }
 
 // -- Session resolution ---------------------------------------------------

@@ -29,15 +29,15 @@ subagent should be able to resume from this file without prior chat context.
 ## 2. References
 
 - `README.md` - public usage docs and architecture overview.
-- `src/main.zig` - CLI command routing plus the new `moo serve` HTTP gateway.
-- `src/client.zig` - Unix-socket control bridge to per-session daemons.
-- `src/daemon.zig` - per-session daemon, PTY/libghostty owner, and control
+- `packages/moo-cli/src/main.zig` - CLI command routing plus the new `moo serve` HTTP gateway.
+- `packages/moo-cli/src/client.zig` - Unix-socket control bridge to per-session daemons.
+- `packages/moo-cli/src/daemon.zig` - per-session daemon, PTY/libghostty owner, and control
   commands.
-- `src/protocol.zig` - length-prefixed Unix-socket protocol and payload limits.
-- `src/window.zig` - libghostty-backed terminal screen/input/resize primitives.
-- `src/paths.zig` - runtime directory, workspace, sidecar, and transcript paths.
-- `src/harness.zig` - live agent transcript detection and dump behavior.
-- `test/integration.zig` - end-to-end PTY, agent, CLI, and HTTP integration
+- `packages/moo-cli/src/protocol.zig` - length-prefixed Unix-socket protocol and payload limits.
+- `packages/moo-cli/src/window.zig` - libghostty-backed terminal screen/input/resize primitives.
+- `packages/moo-cli/src/paths.zig` - runtime directory, workspace, sidecar, and transcript paths.
+- `packages/moo-cli/src/harness.zig` - live agent transcript detection and dump behavior.
+- `packages/moo-cli/test/integration.zig` - end-to-end PTY, agent, CLI, and HTTP integration
   harness.
 - `docs/http-api.md` - v1 HTTP API contract.
 - `docs/adrs/0001-http-api-gateway.md` - architecture decision record.
@@ -256,9 +256,10 @@ Current exit condition: `DONE`.
 
 - **Context:** The implementation needed to preserve libghostty/PTTY ownership
   and existing CLI semantics while adding remote interaction.
-- **Decision:** Implement HTTP routing in `src/main.zig`, keep terminal state in
-  session daemons, extend `src/daemon.zig` with `state`, `resize`, and event
-  cursor controls, and cover behavior with real integration tests.
+- **Decision:** Implement HTTP routing in `packages/moo-cli/src/main.zig`, keep
+  terminal state in session daemons, extend `packages/moo-cli/src/daemon.zig`
+  with `state`, `resize`, and event cursor controls, and cover behavior with
+  real integration tests.
 - **Alternatives rejected:** Shelling out from HTTP handlers; replacing daemon
   control; moving terminal state into the API server.
 - **Scope impact:** none.

@@ -59,6 +59,7 @@ moo ls                     # list sessions
 moo attach work            # reattach (alias: at, a)
 moo rename work api        # rename a session
 moo serve                  # expose the localhost REST API
+moo mcp                    # run the bundled stdio MCP server
 moo kill work              # end a session
 moo kill --all             # end every session
 ```
@@ -112,6 +113,9 @@ moo kill build                         # 5. clean up
 - **HTTP coordination**: `moo serve --addr 127.0.0.1:8765`
   exposes the same create, send, wait, screen, transcript, and workspace
   primitives over a localhost-first REST API; see `docs/http-api.md`.
+- **MCP coordination**: `moo mcp` runs the bundled stdio MCP server. It
+  exposes the HTTP API as tools using `@modelcontextprotocol/sdk` and starts
+  `moo serve` automatically when `MOO_API_URL` is not set.
 - **Exit codes**: `0` success, `1` error, `2` usage error, `3` no such
   session, `4` wait timed out.
 
@@ -217,16 +221,20 @@ One session per task, with `moo ui` to juggle them.
 Requires Zig 0.15.2.
 
 ```sh
-zig build                       # binary in zig-out/bin/moo
+```sh
+bun install --frozen-lockfile   # TypeScript workspace dependencies
+zig build                       # zig-out/bin/moo and moo-mcp-server
 zig build test                  # unit tests
-zig build test-integration     # end-to-end tests on a real PTY
-zig build test-all             # everything
+zig build test-integration      # end-to-end tests on a real PTY
+zig build test-all              # everything
 ```
 
-The libghostty dependency is fetched and built from source
+The repository is a small monorepo: the Zig CLI lives under
+`packages/moo-cli`, and the TypeScript MCP server lives under
+`apps/mcp-server`. The libghostty dependency is fetched and built from source
 automatically (pinned in `build.zig.zon`).
 
-With Nix, `nix develop` opens a shell with the right Zig version, and
+With Nix, `nix develop` opens a shell with the right Zig and Bun versions, and
 `nix build` builds the package to `./result/bin/moo`.
 
 ## Architecture
@@ -237,10 +245,10 @@ your terminal <-(raw tty)-> moo client <-(unix socket)-> session daemon
 ```
 
 - The **client** puts your TTY in raw mode and shuttles bytes over a
-  framed Unix-socket protocol (`src/protocol.zig`).
+  framed Unix-socket protocol (`packages/moo-cli/src/protocol.zig`).
 - The **daemon** (forked on session creation) owns the session's
   command: a PTY-attached child whose output feeds a persistent
-  `ghostty-vt` `TerminalStream` (`src/window.zig`).
+  `ghostty-vt` `TerminalStream` (`packages/moo-cli/src/window.zig`).
 - While attached, output is passed through to your terminal byte for
   byte. On attach the daemon sanitizes your terminal and replays the
   screen from libghostty state using its VT `TerminalFormatter`.

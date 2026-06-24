@@ -7,13 +7,14 @@ pub fn build(b: *std.Build) void {
     const test_filters: []const []const u8 = if (test_filter) |filter| &.{filter} else &.{};
 
     const run_step = b.step("run", "Run moo");
+    const mcp_step = b.step("mcp", "Build the bundled MCP server");
     const test_step = b.step("test", "Run unit tests");
     const integration_step = b.step("test-integration", "Run PTY integration tests");
     const test_all_step = b.step("test-all", "Run all tests");
 
     // Main executable module.
     const exe_mod = b.createModule(.{
-        .root_source_file = b.path("src/main.zig"),
+        .root_source_file = b.path("packages/moo-cli/src/main.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
@@ -36,7 +37,29 @@ pub fn build(b: *std.Build) void {
         .name = "moo",
         .root_module = exe_mod,
     });
-    b.installArtifact(exe);
+    const install_exe = b.addInstallArtifact(exe, .{});
+    b.getInstallStep().dependOn(&install_exe.step);
+
+    const mcp_out = b.getInstallPath(.bin, "moo-mcp-server");
+    const mcp_build = b.addSystemCommand(&.{
+        "bun",
+        "build",
+        "--compile",
+        "apps/mcp-server/src/main.ts",
+        "--outfile",
+        mcp_out,
+    });
+    if (bunCompileTarget(target)) |bun_target| {
+        mcp_build.addArgs(&.{ "--target", bun_target });
+    }
+    mcp_build.step.dependOn(&install_exe.step);
+    const mcp_done = if (@import("builtin").os.tag == .macos and target.result.os.tag == .macos) blk: {
+        const sign = b.addSystemCommand(&.{ "codesign", "--force", "--sign", "-", mcp_out });
+        sign.step.dependOn(&mcp_build.step);
+        break :blk &sign.step;
+    } else &mcp_build.step;
+    mcp_step.dependOn(mcp_done);
+    b.getInstallStep().dependOn(mcp_done);
 
     // Run
     const run_cmd = b.addRunArtifact(exe);
@@ -54,7 +77,7 @@ pub fn build(b: *std.Build) void {
     test_opts.addOptionPath("exe_path", exe.getEmittedBin());
 
     const integration_mod = b.createModule(.{
-        .root_source_file = b.path("test/integration.zig"),
+        .root_source_file = b.path("packages/moo-cli/test/integration.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
@@ -83,7 +106,7 @@ pub fn build(b: *std.Build) void {
 
     // Benchmark: the viewport render hot path (no TTY required).
     const bench_mod = b.createModule(.{
-        .root_source_file = b.path("bench/render.zig"),
+        .root_source_file = b.path("packages/moo-cli/bench/render.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
@@ -106,4 +129,21 @@ pub fn build(b: *std.Build) void {
     const bench_run = b.addRunArtifact(bench_exe);
     const bench_step = b.step("bench", "Run the render microbenchmark");
     bench_step.dependOn(&bench_run.step);
+}
+
+fn bunCompileTarget(target: std.Build.ResolvedTarget) ?[]const u8 {
+    const result = target.result;
+    return switch (result.os.tag) {
+        .linux => switch (result.cpu.arch) {
+            .x86_64 => "bun-linux-x64",
+            .aarch64 => "bun-linux-arm64",
+            else => null,
+        },
+        .macos => switch (result.cpu.arch) {
+            .x86_64 => "bun-darwin-x64",
+            .aarch64 => "bun-darwin-arm64",
+            else => null,
+        },
+        else => null,
+    };
 }

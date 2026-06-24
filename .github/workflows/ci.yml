@@ -19,7 +19,7 @@ jobs:
       - uses: mlugg/setup-zig@v2
         with:
           version: 0.15.2
-      - run: zig fmt --check build.zig build.zig.zon src test
+      - run: zig fmt --check build.zig build.zig.zon packages/moo-cli/src packages/moo-cli/test packages/moo-cli/bench
 
   test:
     name: test (${{ matrix.os }})
@@ -33,6 +33,10 @@ jobs:
       - uses: mlugg/setup-zig@v2
         with:
           version: 0.15.2
+      - uses: oven-sh/setup-bun@v2
+      - run: bun install --frozen-lockfile
+      - run: bun run typecheck
+      - run: bun run test:mcp
       - name: Fetch dependencies (with retry)
         run: |
           for i in 1 2 3 4 5; do
@@ -56,6 +60,10 @@ jobs:
       - uses: mlugg/setup-zig@v2
         with:
           version: 0.15.2
+      - uses: oven-sh/setup-bun@v2
+      - run: bun install --frozen-lockfile
+      - run: bun run typecheck
+      - run: bun run test:mcp
       - name: Fetch dependencies (with retry)
         run: |
           for i in 1 2 3 4 5; do

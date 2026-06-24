@@ -41,6 +41,7 @@ pub const overview =
     \\    kill <name | --all>          end a session, or all of them
     \\    rename <name> <new-name>     rename a session
     \\    serve [--addr host:port]     expose the localhost REST API
+    \\    mcp                          run the bundled stdio MCP server
     \\
     \\  Information
     \\    ws [--json]                  list workspaces and session counts
@@ -275,6 +276,31 @@ pub const commands = [_]Entry{
         \\  moo serve
         \\  MOO_API_TOKEN=secret moo serve --addr 0.0.0.0:8765 --token-env MOO_API_TOKEN
         \\  curl http://127.0.0.1:8765/v1/health
+        \\
+        ,
+    },
+    .{
+        .name = "mcp",
+        .body =
+        \\usage: moo mcp
+        \\
+        \\Run the bundled stdio MCP server. The server exposes moo's HTTP
+        \\API endpoints as MCP tools using @modelcontextprotocol/sdk.
+        \\
+        \\If MOO_API_URL is set, the MCP server connects to that existing
+        \\API instance and uses MOO_API_TOKEN as a bearer token when set.
+        \\Otherwise it starts a private `moo serve --addr 127.0.0.1:0`
+        \\child process and stops it when the MCP process exits.
+        \\
+        \\environment:
+        \\  MOO_API_URL          use an already-running moo HTTP API
+        \\  MOO_API_TOKEN        bearer token for MOO_API_URL
+        \\  MOO_BIN              moo binary used when auto-starting the API
+        \\  MOO_MCP_SERVER_BIN   override the bundled MCP server executable
+        \\
+        \\examples:
+        \\  moo mcp
+        \\  MOO_API_URL=http://127.0.0.1:8765 moo mcp
         \\
         ,
     },

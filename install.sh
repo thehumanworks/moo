@@ -81,6 +81,9 @@ fi
 tar -xzf "$tmp/$asset" -C "$tmp"
 mkdir -p "$install_dir"
 install -m 0755 "$tmp/moo" "$install_dir/moo"
+if [ -f "$tmp/moo-mcp-server" ]; then
+	install -m 0755 "$tmp/moo-mcp-server" "$install_dir/moo-mcp-server"
+fi
 
 log "Installed $("$install_dir/moo" -V 2>&1) to $install_dir/moo"
 case ":$PATH:" in

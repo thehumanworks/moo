@@ -35,7 +35,10 @@
           inherit version;
           src = ./.;
 
-          nativeBuildInputs = [ zig ];
+          nativeBuildInputs = [
+            zig
+            pkgs.bun
+          ];
 
           dontConfigure = true;
           dontBuild = true;
@@ -67,7 +70,10 @@
           inherit version;
           src = ./.;
 
-          nativeBuildInputs = [ zig.hook ];
+          nativeBuildInputs = [
+            zig.hook
+            pkgs.bun
+          ];
 
           # zig.hook builds with --release=safe, matching the
           # optimization mode of the published release binaries.
@@ -101,7 +107,10 @@
         };
 
         devShells.default = pkgs.mkShell {
-          packages = [ zig ];
+          packages = [
+            zig
+            pkgs.bun
+          ];
         };
 
         formatter = pkgs.nixfmt-tree;

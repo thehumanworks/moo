@@ -1186,6 +1186,7 @@ test "help: overview, command pages, topics, and version" {
     try std.testing.expect(overview.term.Exited == 0);
     try std.testing.expect(std.mem.indexOf(u8, overview.stdout, "commands:") != null);
     try std.testing.expect(std.mem.indexOf(u8, overview.stdout, "kill") != null);
+    try std.testing.expect(std.mem.indexOf(u8, overview.stdout, "mcp") != null);
     try std.testing.expect(std.mem.indexOf(u8, overview.stdout, "attach, at, a <name>") != null);
 
     // The overview stays lean: no topics or exit-code sections (the
@@ -1205,6 +1206,12 @@ test "help: overview, command pages, topics, and version" {
     defer alloc.free(automation.stderr);
     try std.testing.expect(automation.term.Exited == 0);
     try std.testing.expect(std.mem.indexOf(u8, automation.stdout, "wait") != null);
+
+    const mcp_page = try h.run(&.{ "mcp", "--help" });
+    defer alloc.free(mcp_page.stdout);
+    defer alloc.free(mcp_page.stderr);
+    try std.testing.expect(mcp_page.term.Exited == 0);
+    try std.testing.expect(std.mem.indexOf(u8, mcp_page.stdout, "stdio MCP server") != null);
 
     const all = try h.run(&.{ "help", "--all" });
     defer alloc.free(all.stdout);

@@ -1,0 +1,19 @@
+{
+  "name": "moo-monorepo",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "build:mcp": "cd apps/mcp-server && bun run build",
+    "smoke:mcp": "cd apps/mcp-server && bun run smoke",
+    "test:mcp": "cd apps/mcp-server && bun test",
+    "typecheck": "cd apps/mcp-server && bun run typecheck"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.3.5",
+    "typescript": "^5.9.3"
+  }
+}
