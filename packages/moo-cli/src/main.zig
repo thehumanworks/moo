@@ -280,6 +280,15 @@ pub const SessionInfo = struct {
     title: []const u8,
 };
 
+const SessionMeta = struct {
+    cwd: ?[]u8 = null,
+    created_at_ms: i64 = 0,
+
+    fn deinit(self: SessionMeta, alloc: std.mem.Allocator) void {
+        if (self.cwd) |cwd| alloc.free(cwd);
+    }
+};
+
 /// Query a session daemon, deleting the socket when the daemon is gone.
 pub fn sessionInfo(alloc: std.mem.Allocator, dir: []const u8, name: []const u8) !?SessionInfo {
     const sock = try paths.socketPath(alloc, dir, name);
@@ -419,6 +428,10 @@ fn startSessionNamed(
     // existing session's sidecar or transcript store.
     const listen_fd = try bindListen(alloc, sock);
 
+    var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const cwd = posix.getcwd(&cwd_buf) catch ".";
+    writeSessionMeta(alloc, dir, name, cwd);
+
     // An agent harness augments the launch command (pinning a session id),
     // supplies per-session env (e.g. CODEX_HOME), and records a sidecar so the
     // transcript can be found by `moo read`. Allocations here live until the
@@ -426,7 +439,7 @@ fn startSessionNamed(
     var argv = cmd_argv;
     var env_overrides: []const [2][]const u8 = &.{};
     if (agent) |ag| {
-        const launch = prepareAgent(alloc, dir, name, ag, cmd_argv);
+        const launch = prepareAgent(alloc, dir, name, ag, cmd_argv, cwd);
         argv = launch.argv;
         env_overrides = launch.env;
     }
@@ -480,6 +493,7 @@ fn prepareAgent(
     name: []const u8,
     agent: harness.Agent,
     cmd_argv: []const []const u8,
+    cwd: []const u8,
 ) AgentLaunch {
     const fallback: AgentLaunch = .{ .argv = cmd_argv, .env = &.{} };
     const store = paths.storeDir(alloc, dir, name) catch return fallback;
@@ -488,8 +502,6 @@ fn prepareAgent(
     std.fs.cwd().deleteTree(store) catch {};
     const prepared = agent.prepare(alloc, cmd_argv, store) catch return fallback;
 
-    var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const cwd = posix.getcwd(&cwd_buf) catch ".";
     const overrides = agent.launchOverrides(alloc, prepared.session_id, cwd, store) catch
         harness.LaunchOverrides{};
 
@@ -499,7 +511,30 @@ fn prepareAgent(
         .session_store = overrides.session_store,
         .cwd = cwd,
     });
+    appendRunHistorySidecar(alloc, dir, name, .{
+        .agent = agent,
+        .session_id = prepared.session_id,
+        .session_store = overrides.session_store,
+        .cwd = cwd,
+    }, .sidecar, .exact);
     return .{ .argv = prepared.argv, .env = overrides.env };
+}
+
+fn writeSessionMeta(
+    alloc: std.mem.Allocator,
+    dir: []const u8,
+    name: []const u8,
+    cwd: []const u8,
+) void {
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(alloc);
+    out.appendSlice(alloc, "{\"created_at_ms\":") catch return;
+    out.print(alloc, "{d},\"cwd\":", .{std.time.milliTimestamp()}) catch return;
+    appendJsonString(alloc, &out, cwd) catch return;
+    out.appendSlice(alloc, "}\n") catch return;
+    const path = paths.sessionMetaPath(alloc, dir, name) catch return;
+    defer alloc.free(path);
+    std.fs.cwd().writeFile(.{ .sub_path = path, .data = out.items }) catch {};
 }
 
 fn writeSidecar(
@@ -520,16 +555,17 @@ fn writeSidecar(
 /// name), plus the default-name store and the sidecar file. Best-effort; a
 /// non-agent session simply has none of these.
 fn removeAgentSession(alloc: std.mem.Allocator, dir: []const u8, name: []const u8) void {
-    if (paths.sidecarPath(alloc, dir, name)) |sc_path| {
-        defer alloc.free(sc_path);
-        if (readTranscript(alloc, sc_path)) |sc_data| {
+    const sc_path = paths.sidecarPath(alloc, dir, name) catch null;
+    if (sc_path) |path| {
+        defer alloc.free(path);
+        if (readTranscript(alloc, path)) |sc_data| {
             defer alloc.free(sc_data);
             if (harness.Sidecar.fromJson(alloc, sc_data)) |sc| {
                 defer sc.deinit(alloc);
                 if (sc.session_store) |store| std.fs.cwd().deleteTree(store) catch {};
             } else |_| {}
         }
-    } else |_| {}
+    }
     paths.removeAgentFiles(alloc, dir, name);
 }
 
@@ -1040,6 +1076,8 @@ const max_transcript_bytes: usize = 64 * 1024 * 1024;
 fn cmdRead(alloc: std.mem.Allocator, args: []const [:0]const u8) !void {
     var json = false;
     var thinking = false;
+    var history = false;
+    var current = false;
     var agent_kind: ?[]const u8 = null;
     var file: ?[]const u8 = null;
     var positional: ?[]const u8 = null;
@@ -1053,6 +1091,10 @@ fn cmdRead(alloc: std.mem.Allocator, args: []const [:0]const u8) !void {
             json = true;
         } else if (std.mem.eql(u8, arg, "--thinking")) {
             thinking = true;
+        } else if (std.mem.eql(u8, arg, "--history")) {
+            history = true;
+        } else if (std.mem.eql(u8, arg, "--current")) {
+            current = true;
         } else if (flagValue("read", "--agent", args, &i)) |v| {
             agent_kind = v;
         } else if (flagValue("read", "--file", args, &i)) |v| {
@@ -1071,13 +1113,15 @@ fn cmdRead(alloc: std.mem.Allocator, args: []const [:0]const u8) !void {
     }
 
     // File mode: dump any saved transcript by path, no session needed.
-    if (agent_kind) |kind| {
+    if (file) |path| {
+        const kind = agent_kind orelse
+            usageFail("read", "--file requires --agent <claude|codex|pi>", .{});
         const agent = harness.Agent.fromId(kind) orelse
             usageFail("read", "unknown agent '{s}' (claude, codex, pi)", .{kind});
         if (!agent.hasTranscript())
             usageFail("read", "agent '{s}' has no transcript (claude, codex, pi)", .{kind});
-        const path = file orelse positional orelse
-            usageFail("read", "--agent needs a transcript file (a path, or --file)", .{});
+        if (positional != null)
+            usageFail("read", "unexpected session/path argument with --file", .{});
         const data = readTranscript(alloc, path) orelse
             fail(exit_runtime, "cannot read transcript {s}", .{path});
         defer alloc.free(data);
@@ -1090,80 +1134,871 @@ fn cmdRead(alloc: std.mem.Allocator, args: []const [:0]const u8) !void {
         return;
     }
 
-    // Session mode: resolve a live session, read its sidecar, locate transcript.
+    const agent_override = if (agent_kind) |kind| blk: {
+        const agent = harness.Agent.fromId(kind) orelse
+            usageFail("read", "unknown agent '{s}' (claude, codex, pi)", .{kind});
+        if (!agent.hasTranscript())
+            usageFail("read", "agent '{s}' has no transcript (claude, codex, pi)", .{kind});
+        break :blk agent;
+    } else null;
+
+    // Session mode: resolve a live session, then resolve sidecar, override,
+    // detected process, and bounded store-scan transcript candidates.
     const want = positional orelse usageFail("read", "a session name is required", .{});
     const dir = try workspaceDir("read", alloc, ws_flag);
     defer alloc.free(dir);
     const name = try resolveSession(alloc, dir, want);
     defer alloc.free(name);
-
-    const sc_path = try paths.sidecarPath(alloc, dir, name);
-    defer alloc.free(sc_path);
-    const sc_data = readTranscript(alloc, sc_path) orelse fail(
-        exit_runtime,
-        "session {s} was not started with --agent (nothing to read)",
-        .{name},
-    );
-    defer alloc.free(sc_data);
-    const sc = harness.Sidecar.fromJson(alloc, sc_data) catch
-        fail(exit_runtime, "corrupt agent sidecar for {s}", .{name});
-    defer sc.deinit(alloc);
-
-    // The transcript may not exist yet (e.g. pi's lazy file before the first
-    // reply); treat that as empty, which classifies as not-idle.
-    const t_path = sc.agent.transcriptPath(alloc, sc) catch null;
-    defer if (t_path) |p| alloc.free(p);
-    const data = if (t_path) |p| (readTranscript(alloc, p) orelse try alloc.dupe(u8, "")) else try alloc.dupe(u8, "");
-    defer alloc.free(data);
-
-    var report = try sc.agent.detect(alloc, data);
-    defer report.deinit(alloc);
+    var resolved = resolveTranscriptRuns(alloc, dir, name, .{
+        .agent_override = agent_override,
+        .history = history and !current,
+        .current = current or !history,
+    }) catch |err| switch (err) {
+        error.BadSidecar => fail(exit_runtime, "corrupt agent sidecar for {s}", .{name}),
+        error.NotAgent => fail(exit_runtime, "no agent transcript found for session {s}", .{name}),
+        error.AmbiguousTranscript => {
+            if (json) {
+                const body = try transcriptErrorJson(alloc, "ambiguous_transcript", "multiple matching agent transcripts; pass --agent or narrow the session context");
+                defer alloc.free(body);
+                try stdoutWrite(body);
+                posix.exit(exit_runtime);
+            }
+            fail(exit_runtime, "multiple matching agent transcripts for {s}; pass --agent or narrow the session context", .{name});
+        },
+        else => return err,
+    };
+    defer resolved.deinit(alloc);
 
     if (json) {
-        var out: std.ArrayList(u8) = .empty;
-        defer out.deinit(alloc);
-        try out.appendSlice(alloc, "{\"session\":");
-        try appendJsonString(alloc, &out, name);
-        try out.appendSlice(alloc, ",\"agent\":");
-        try appendJsonString(alloc, &out, sc.agent.id());
-        try out.appendSlice(alloc, ",\"state\":");
-        try appendJsonString(alloc, &out, report.state.asStr());
-        if (report.stop_reason) |s| {
-            try out.appendSlice(alloc, ",\"stop_reason\":");
-            try appendJsonString(alloc, &out, s);
-        }
-        if (report.detail) |d| {
-            try out.appendSlice(alloc, ",\"detail\":");
-            try appendJsonString(alloc, &out, d);
-        }
-        const tail = try std.fmt.allocPrint(alloc, ",\"messages\":{d},\"transcript\":", .{report.messages});
-        defer alloc.free(tail);
-        try out.appendSlice(alloc, tail);
-        const arr = try sc.agent.dumpJson(alloc, data, thinking);
-        defer alloc.free(arr);
-        try out.appendSlice(alloc, std.mem.trimRight(u8, arr, " \n"));
-        try out.appendSlice(alloc, "}\n");
-        return stdoutWrite(out.items);
+        const body = try renderTranscriptJson(alloc, name, resolved.runs, thinking);
+        defer alloc.free(body);
+        return stdoutWrite(body);
     }
-
-    // Human view: a one-line status header, then the conversation.
-    var header: std.ArrayList(u8) = .empty;
-    defer header.deinit(alloc);
-    try header.print(alloc, "{s} · {s} · {s}", .{ name, sc.agent.id(), report.state.asStr() });
-    if (report.stop_reason) |s| try header.print(alloc, " ({s})", .{s});
-    if (report.detail) |d| try header.print(alloc, " \u{2014} {s}", .{d});
-    try header.print(alloc, " · {d} message{s}\n\n", .{ report.messages, if (report.messages == 1) "" else "s" });
-    try stdoutWrite(header.items);
-
-    const text = try sc.agent.dumpText(alloc, data, thinking);
-    defer alloc.free(text);
-    try emitDump(text, false);
+    const body = try renderTranscriptText(alloc, name, resolved.runs, thinking);
+    defer alloc.free(body);
+    try emitDump(body, false);
 }
 
 /// Read a transcript/sidecar file fully into memory; null on any error
 /// (missing, unreadable). Caller frees.
 fn readTranscript(alloc: std.mem.Allocator, path: []const u8) ?[]u8 {
     return std.fs.cwd().readFileAlloc(alloc, path, max_transcript_bytes) catch null;
+}
+
+const ReadSource = enum {
+    history,
+    sidecar,
+    override,
+    process,
+    scan,
+
+    fn asStr(self: ReadSource) []const u8 {
+        return @tagName(self);
+    }
+};
+
+const ReadConfidence = enum {
+    low,
+    medium,
+    high,
+    exact,
+
+    fn asStr(self: ReadConfidence) []const u8 {
+        return @tagName(self);
+    }
+};
+
+const ReadOptions = struct {
+    agent_override: ?harness.Agent = null,
+    history: bool = false,
+    current: bool = true,
+};
+
+const TranscriptRun = struct {
+    agent: harness.Agent,
+    source: ReadSource,
+    confidence: ReadConfidence,
+    state: harness.SessionState = .unknown,
+    session_id: ?[]u8 = null,
+    session_store: ?[]u8 = null,
+    cwd: ?[]u8 = null,
+    transcript_path: ?[]u8 = null,
+    transcript_key: ?[]u8 = null,
+    detected_at_ms: i64 = 0,
+    updated_at_ms: i64 = 0,
+
+    fn deinit(self: TranscriptRun, alloc: std.mem.Allocator) void {
+        if (self.session_id) |s| alloc.free(s);
+        if (self.session_store) |s| alloc.free(s);
+        if (self.cwd) |s| alloc.free(s);
+        if (self.transcript_path) |s| alloc.free(s);
+        if (self.transcript_key) |s| alloc.free(s);
+    }
+
+    fn clone(self: TranscriptRun, alloc: std.mem.Allocator) !TranscriptRun {
+        return .{
+            .agent = self.agent,
+            .source = self.source,
+            .confidence = self.confidence,
+            .state = self.state,
+            .session_id = try dupeOptMain(alloc, self.session_id),
+            .session_store = try dupeOptMain(alloc, self.session_store),
+            .cwd = try dupeOptMain(alloc, self.cwd),
+            .transcript_path = try dupeOptMain(alloc, self.transcript_path),
+            .transcript_key = try dupeOptMain(alloc, self.transcript_key),
+            .detected_at_ms = self.detected_at_ms,
+            .updated_at_ms = self.updated_at_ms,
+        };
+    }
+};
+
+const TranscriptResolution = struct {
+    runs: []TranscriptRun,
+
+    fn deinit(self: *TranscriptResolution, alloc: std.mem.Allocator) void {
+        for (self.runs) |run| run.deinit(alloc);
+        alloc.free(self.runs);
+    }
+};
+
+fn resolveTranscriptRuns(
+    alloc: std.mem.Allocator,
+    dir: []const u8,
+    name: []const u8,
+    opts: ReadOptions,
+) !TranscriptResolution {
+    var all: std.ArrayList(TranscriptRun) = .empty;
+    errdefer deinitRunList(alloc, &all);
+
+    try loadRunHistory(alloc, dir, name, &all);
+    const meta = try readSessionMeta(alloc, dir, name);
+    defer meta.deinit(alloc);
+
+    if (try sidecarRun(alloc, dir, name)) |run| {
+        try appendRunDedupe(alloc, &all, run);
+        appendRunHistoryCandidate(alloc, dir, name, run);
+    }
+
+    var process_agent: ?harness.Agent = null;
+    if (opts.agent_override) |agent| {
+        try discoverAgentRuns(alloc, dir, name, agent, .override, meta, &all);
+    } else {
+        process_agent = detectProcessAgent(alloc, dir, name) catch null;
+        if (process_agent) |agent| {
+            try discoverAgentRuns(alloc, dir, name, agent, .process, meta, &all);
+        }
+        if (all.items.len == 0) {
+            inline for (.{ harness.Agent.claude, harness.Agent.codex, harness.Agent.pi }) |agent| {
+                try discoverAgentRuns(alloc, dir, name, agent, .scan, meta, &all);
+            }
+        }
+    }
+
+    if (all.items.len == 0) return error.NotAgent;
+    sortRuns(all.items);
+
+    if (opts.history and !opts.current) {
+        return .{ .runs = try all.toOwnedSlice(alloc) };
+    }
+
+    const idx = selectCurrentRun(all.items, opts.agent_override, process_agent) orelse
+        return error.NotAgent;
+    const selected = try all.items[idx].clone(alloc);
+    deinitRunList(alloc, &all);
+    const runs = try alloc.alloc(TranscriptRun, 1);
+    runs[0] = selected;
+    return .{ .runs = runs };
+}
+
+fn discoverAgentRuns(
+    alloc: std.mem.Allocator,
+    dir: []const u8,
+    name: []const u8,
+    agent: harness.Agent,
+    source: ReadSource,
+    meta: SessionMeta,
+    all: *std.ArrayList(TranscriptRun),
+) !void {
+    const before = all.items.len;
+    const cwd = meta.cwd orelse currentCwd(alloc) catch "";
+    defer if (meta.cwd == null and cwd.len > 0) alloc.free(cwd);
+    const min_mtime_ns: i128 = if (meta.created_at_ms > 0)
+        @as(i128, meta.created_at_ms - 5000) * std.time.ns_per_ms
+    else
+        0;
+
+    const matches = try scanAgentStores(alloc, agent, cwd, min_mtime_ns, source, all);
+    if (matches > 1) return error.AmbiguousTranscript;
+    if (matches == 0 and (source == .override or source == .process)) {
+        var run: TranscriptRun = .{
+            .agent = agent,
+            .source = source,
+            .confidence = .low,
+            .cwd = if (cwd.len > 0) try alloc.dupe(u8, cwd) else null,
+            .detected_at_ms = std.time.milliTimestamp(),
+            .updated_at_ms = std.time.milliTimestamp(),
+        };
+        run.transcript_key = try makeRunKey(alloc, run);
+        try appendRunDedupe(alloc, all, run);
+        appendRunHistoryCandidate(alloc, dir, name, run);
+    }
+    if (all.items.len > before) {
+        for (all.items[before..]) |run| appendRunHistoryCandidate(alloc, dir, name, run);
+    }
+}
+
+fn scanAgentStores(
+    alloc: std.mem.Allocator,
+    agent: harness.Agent,
+    cwd: []const u8,
+    min_mtime_ns: i128,
+    source: ReadSource,
+    out: *std.ArrayList(TranscriptRun),
+) !usize {
+    var matches: usize = 0;
+    switch (agent) {
+        .claude => {
+            const root = try homeJoin(alloc, &.{ ".claude", "projects" });
+            defer alloc.free(root);
+            matches += try scanJsonlTree(alloc, agent, root, cwd, min_mtime_ns, source, out);
+        },
+        .codex => {
+            if (posix.getenv("CODEX_HOME")) |home| {
+                const sessions = try std.fs.path.join(alloc, &.{ home, "sessions" });
+                defer alloc.free(sessions);
+                matches += try scanJsonlTree(alloc, agent, sessions, cwd, min_mtime_ns, source, out);
+            }
+            const root = try homeJoin(alloc, &.{ ".codex", "sessions" });
+            defer alloc.free(root);
+            matches += try scanJsonlTree(alloc, agent, root, cwd, min_mtime_ns, source, out);
+        },
+        .pi => {
+            const root = try homeJoin(alloc, &.{".pi"});
+            defer alloc.free(root);
+            matches += try scanJsonlTree(alloc, agent, root, cwd, min_mtime_ns, source, out);
+        },
+        .raw, .bash, .zsh => {},
+    }
+    return matches;
+}
+
+fn scanJsonlTree(
+    alloc: std.mem.Allocator,
+    agent: harness.Agent,
+    root: []const u8,
+    cwd: []const u8,
+    min_mtime_ns: i128,
+    source: ReadSource,
+    out: *std.ArrayList(TranscriptRun),
+) !usize {
+    var dir = std.fs.cwd().openDir(root, .{ .iterate = true }) catch return 0;
+    defer dir.close();
+    var walker = dir.walk(alloc) catch return 0;
+    defer walker.deinit();
+    var scanned: usize = 0;
+    var matches: usize = 0;
+    while (walker.next() catch null) |entry| {
+        if (entry.kind != .file) continue;
+        if (!agentTranscriptName(agent, entry.basename)) continue;
+        scanned += 1;
+        if (scanned > 512) break;
+        const st = dir.statFile(entry.path) catch continue;
+        if (st.mtime < min_mtime_ns) continue;
+        const full = try std.fs.path.join(alloc, &.{ root, entry.path });
+        errdefer alloc.free(full);
+        const data = readTranscript(alloc, full) orelse {
+            alloc.free(full);
+            continue;
+        };
+        defer alloc.free(data);
+        if (cwd.len > 0 and std.mem.indexOf(u8, data, cwd) == null) {
+            alloc.free(full);
+            continue;
+        }
+        var run: TranscriptRun = .{
+            .agent = agent,
+            .source = source,
+            .confidence = if (cwd.len > 0) .high else .medium,
+            .cwd = if (cwd.len > 0) try alloc.dupe(u8, cwd) else null,
+            .transcript_path = full,
+            .detected_at_ms = std.time.milliTimestamp(),
+            .updated_at_ms = @intCast(@divFloor(st.mtime, std.time.ns_per_ms)),
+        };
+        run.transcript_key = try makeRunKey(alloc, run);
+        try appendRunDedupe(alloc, out, run);
+        matches += 1;
+    }
+    return matches;
+}
+
+fn agentTranscriptName(agent: harness.Agent, name: []const u8) bool {
+    if (!std.mem.endsWith(u8, name, ".jsonl")) return false;
+    return switch (agent) {
+        .codex => std.mem.startsWith(u8, name, "rollout-"),
+        .claude, .pi => true,
+        .raw, .bash, .zsh => false,
+    };
+}
+
+fn sidecarRun(alloc: std.mem.Allocator, dir: []const u8, name: []const u8) !?TranscriptRun {
+    const sc_path = try paths.sidecarPath(alloc, dir, name);
+    defer alloc.free(sc_path);
+    const sc_data = readTranscript(alloc, sc_path) orelse return null;
+    defer alloc.free(sc_data);
+    const sc = harness.Sidecar.fromJson(alloc, sc_data) catch return error.BadSidecar;
+    defer sc.deinit(alloc);
+    var run = try runFromSidecar(alloc, sc, .sidecar, .exact);
+    if (sc.agent.transcriptPath(alloc, sc) catch null) |p| {
+        run.transcript_path = p;
+        if (run.transcript_key) |k| alloc.free(k);
+        run.transcript_key = try makeRunKey(alloc, run);
+        if (statMtimeMs(p)) |mtime| run.updated_at_ms = mtime;
+    }
+    return run;
+}
+
+fn runFromSidecar(
+    alloc: std.mem.Allocator,
+    sc: harness.Sidecar,
+    source: ReadSource,
+    confidence: ReadConfidence,
+) !TranscriptRun {
+    var run: TranscriptRun = .{
+        .agent = sc.agent,
+        .source = source,
+        .confidence = confidence,
+        .session_id = try dupeOptMain(alloc, sc.session_id),
+        .session_store = try dupeOptMain(alloc, sc.session_store),
+        .cwd = try dupeOptMain(alloc, sc.cwd),
+        .detected_at_ms = std.time.milliTimestamp(),
+        .updated_at_ms = std.time.milliTimestamp(),
+    };
+    run.transcript_key = try makeRunKey(alloc, run);
+    return run;
+}
+
+fn transcriptPathForRun(alloc: std.mem.Allocator, run: TranscriptRun) !?[]u8 {
+    if (run.transcript_path) |p| return try alloc.dupe(u8, p);
+    const sc: harness.Sidecar = .{
+        .agent = run.agent,
+        .session_id = run.session_id,
+        .session_store = run.session_store,
+        .cwd = run.cwd,
+    };
+    return run.agent.transcriptPath(alloc, sc) catch null;
+}
+
+fn loadRunHistory(
+    alloc: std.mem.Allocator,
+    dir: []const u8,
+    name: []const u8,
+    out: *std.ArrayList(TranscriptRun),
+) !void {
+    const path = try paths.runHistoryPath(alloc, dir, name);
+    defer alloc.free(path);
+    const data = readTranscript(alloc, path) orelse return;
+    defer alloc.free(data);
+    var it = std.mem.splitScalar(u8, data, '\n');
+    while (it.next()) |raw| {
+        const line = std.mem.trim(u8, raw, " \t\r");
+        if (line.len == 0) continue;
+        const run = parseHistoryRun(alloc, line) catch continue;
+        try appendRunDedupe(alloc, out, run);
+    }
+}
+
+fn parseHistoryRun(alloc: std.mem.Allocator, line: []const u8) !TranscriptRun {
+    var parsed = std.json.parseFromSlice(std.json.Value, alloc, line, .{}) catch
+        return error.BadHistory;
+    defer parsed.deinit();
+    const agent = harness.Agent.fromId(jsonString(parsed.value, "agent") orelse "") orelse
+        return error.BadHistory;
+    const source = readSourceFromId(jsonString(parsed.value, "source") orelse "history");
+    const confidence = readConfidenceFromId(jsonString(parsed.value, "confidence") orelse "medium");
+    var run: TranscriptRun = .{
+        .agent = agent,
+        .source = source,
+        .confidence = confidence,
+        .state = readStateFromId(jsonString(parsed.value, "state") orelse "unknown"),
+        .session_id = try dupeOptMain(alloc, jsonString(parsed.value, "session_id")),
+        .session_store = try dupeOptMain(alloc, jsonString(parsed.value, "session_store")),
+        .cwd = try dupeOptMain(alloc, jsonString(parsed.value, "cwd")),
+        .transcript_path = try dupeOptMain(alloc, jsonString(parsed.value, "transcript_path")),
+        .transcript_key = try dupeOptMain(alloc, jsonString(parsed.value, "transcript_key")),
+        .detected_at_ms = jsonI64(parsed.value, "detected_at_ms") orelse 0,
+        .updated_at_ms = jsonI64(parsed.value, "updated_at_ms") orelse 0,
+    };
+    if (run.transcript_key == null) run.transcript_key = try makeRunKey(alloc, run);
+    return run;
+}
+
+fn appendRunHistorySidecar(
+    alloc: std.mem.Allocator,
+    dir: []const u8,
+    name: []const u8,
+    sc: harness.Sidecar,
+    source: ReadSource,
+    confidence: ReadConfidence,
+) void {
+    const run = runFromSidecar(alloc, sc, source, confidence) catch return;
+    defer run.deinit(alloc);
+    appendRunHistoryCandidate(alloc, dir, name, run);
+}
+
+fn appendRunHistoryCandidate(
+    alloc: std.mem.Allocator,
+    dir: []const u8,
+    name: []const u8,
+    run: TranscriptRun,
+) void {
+    var line: std.ArrayList(u8) = .empty;
+    defer line.deinit(alloc);
+    appendRunHistoryJson(alloc, &line, run) catch return;
+    line.append(alloc, '\n') catch return;
+    const path = paths.runHistoryPath(alloc, dir, name) catch return;
+    defer alloc.free(path);
+    var file = std.fs.cwd().openFile(path, .{ .mode = .read_write }) catch |err| switch (err) {
+        error.FileNotFound => std.fs.cwd().createFile(path, .{ .read = true }) catch return,
+        else => return,
+    };
+    defer file.close();
+    file.seekFromEnd(0) catch return;
+    file.writeAll(line.items) catch return;
+}
+
+fn appendRunHistoryJson(alloc: std.mem.Allocator, out: *std.ArrayList(u8), run: TranscriptRun) !void {
+    try out.appendSlice(alloc, "{\"agent\":");
+    try appendJsonString(alloc, out, run.agent.id());
+    try out.appendSlice(alloc, ",\"source\":");
+    try appendJsonString(alloc, out, run.source.asStr());
+    try out.appendSlice(alloc, ",\"state\":");
+    try appendJsonString(alloc, out, run.state.asStr());
+    try out.appendSlice(alloc, ",\"confidence\":");
+    try appendJsonString(alloc, out, run.confidence.asStr());
+    if (run.session_id) |s| {
+        try out.appendSlice(alloc, ",\"session_id\":");
+        try appendJsonString(alloc, out, s);
+    }
+    if (run.session_store) |s| {
+        try out.appendSlice(alloc, ",\"session_store\":");
+        try appendJsonString(alloc, out, s);
+    }
+    if (run.cwd) |s| {
+        try out.appendSlice(alloc, ",\"cwd\":");
+        try appendJsonString(alloc, out, s);
+    }
+    if (run.transcript_path) |s| {
+        try out.appendSlice(alloc, ",\"transcript_path\":");
+        try appendJsonString(alloc, out, s);
+    }
+    if (run.transcript_key) |s| {
+        try out.appendSlice(alloc, ",\"transcript_key\":");
+        try appendJsonString(alloc, out, s);
+    }
+    try out.print(alloc, ",\"detected_at_ms\":{d},\"updated_at_ms\":{d}}}", .{
+        run.detected_at_ms,
+        run.updated_at_ms,
+    });
+}
+
+fn readSessionMeta(alloc: std.mem.Allocator, dir: []const u8, name: []const u8) !SessionMeta {
+    const path = try paths.sessionMetaPath(alloc, dir, name);
+    defer alloc.free(path);
+    const data = readTranscript(alloc, path) orelse return .{
+        .cwd = currentCwd(alloc) catch null,
+        .created_at_ms = 0,
+    };
+    defer alloc.free(data);
+    var parsed = std.json.parseFromSlice(std.json.Value, alloc, data, .{}) catch return .{
+        .cwd = currentCwd(alloc) catch null,
+        .created_at_ms = 0,
+    };
+    defer parsed.deinit();
+    return .{
+        .cwd = try dupeOptMain(alloc, jsonString(parsed.value, "cwd")),
+        .created_at_ms = jsonI64(parsed.value, "created_at_ms") orelse 0,
+    };
+}
+
+fn appendRunDedupe(alloc: std.mem.Allocator, list: *std.ArrayList(TranscriptRun), run_in: TranscriptRun) !void {
+    var run = run_in;
+    if (run.transcript_key == null) run.transcript_key = try makeRunKey(alloc, run);
+    const key = run.transcript_key.?;
+    for (list.items, 0..) |*existing, idx| {
+        _ = idx;
+        if (existing.transcript_key) |ek| {
+            if (std.mem.eql(u8, ek, key)) {
+                if (runRank(run) >= runRank(existing.*) and run.updated_at_ms >= existing.updated_at_ms) {
+                    existing.deinit(alloc);
+                    existing.* = run;
+                } else {
+                    run.deinit(alloc);
+                }
+                return;
+            }
+        }
+    }
+    try list.append(alloc, run);
+}
+
+fn makeRunKey(alloc: std.mem.Allocator, run: TranscriptRun) ![]u8 {
+    if (run.session_id) |sid| return std.fmt.allocPrint(alloc, "{s}:sid:{s}", .{ run.agent.id(), sid });
+    if (run.session_store) |store| return std.fmt.allocPrint(alloc, "{s}:store:{s}", .{ run.agent.id(), store });
+    if (run.transcript_path) |path| return std.fmt.allocPrint(alloc, "{s}:path:{s}", .{ run.agent.id(), path });
+    if (run.cwd) |cwd| return std.fmt.allocPrint(alloc, "{s}:cwd:{s}", .{ run.agent.id(), cwd });
+    return std.fmt.allocPrint(alloc, "{s}:unknown", .{run.agent.id()});
+}
+
+fn selectCurrentRun(
+    runs: []const TranscriptRun,
+    agent_override: ?harness.Agent,
+    process_agent: ?harness.Agent,
+) ?usize {
+    var best: ?usize = null;
+    for (runs, 0..) |run, idx| {
+        if (agent_override) |agent| {
+            if (run.agent != agent) continue;
+        } else if (process_agent) |agent| {
+            if (run.agent != agent) continue;
+        }
+        if (best == null or betterCurrent(run, runs[best.?])) best = idx;
+    }
+    if (best != null) return best;
+    for (runs, 0..) |run, idx| {
+        if (best == null or betterCurrent(run, runs[best.?])) best = idx;
+    }
+    return best;
+}
+
+fn betterCurrent(a: TranscriptRun, b: TranscriptRun) bool {
+    const ar = runRank(a);
+    const br = runRank(b);
+    if (ar != br) return ar > br;
+    return a.updated_at_ms > b.updated_at_ms;
+}
+
+fn runRank(run: TranscriptRun) u8 {
+    const source_rank: u8 = switch (run.source) {
+        .override => 50,
+        .process => 45,
+        .sidecar => 40,
+        .scan => 30,
+        .history => 10,
+    };
+    const conf_rank: u8 = switch (run.confidence) {
+        .exact => 4,
+        .high => 3,
+        .medium => 2,
+        .low => 1,
+    };
+    return source_rank + conf_rank;
+}
+
+fn sortRuns(runs: []TranscriptRun) void {
+    std.mem.sort(TranscriptRun, runs, {}, struct {
+        fn lessThan(_: void, a: TranscriptRun, b: TranscriptRun) bool {
+            if (a.updated_at_ms != b.updated_at_ms) return a.updated_at_ms < b.updated_at_ms;
+            return runRank(a) < runRank(b);
+        }
+    }.lessThan);
+}
+
+fn deinitRunList(alloc: std.mem.Allocator, list: *std.ArrayList(TranscriptRun)) void {
+    for (list.items) |run| run.deinit(alloc);
+    list.deinit(alloc);
+}
+
+fn detectProcessAgent(alloc: std.mem.Allocator, dir: []const u8, name: []const u8) !?harness.Agent {
+    const result = try controlSession(alloc, dir, name, &.{"pid"});
+    defer alloc.free(result.text);
+    if (!result.ok) return null;
+    const root_pid = std.fmt.parseInt(i32, std.mem.trim(u8, result.text, " \t\r\n"), 10) catch return null;
+    return detectDescendantAgent(alloc, root_pid);
+}
+
+const PsProc = struct {
+    pid: i32,
+    ppid: i32,
+    agent: ?harness.Agent,
+};
+
+fn detectDescendantAgent(alloc: std.mem.Allocator, root_pid: i32) !?harness.Agent {
+    const ps = std.process.Child.run(.{
+        .allocator = alloc,
+        .argv = &.{ "/bin/ps", "-axo", "pid=,ppid=,comm=" },
+    }) catch return null;
+    defer alloc.free(ps.stdout);
+    defer alloc.free(ps.stderr);
+    if (ps.term != .Exited or ps.term.Exited != 0) return null;
+
+    var procs: std.ArrayList(PsProc) = .empty;
+    defer procs.deinit(alloc);
+    var it = std.mem.splitScalar(u8, ps.stdout, '\n');
+    while (it.next()) |line_raw| {
+        const line = std.mem.trim(u8, line_raw, " \t\r");
+        if (line.len == 0) continue;
+        var fields = std.mem.tokenizeAny(u8, line, " \t");
+        const pid = std.fmt.parseInt(i32, fields.next() orelse continue, 10) catch continue;
+        const ppid = std.fmt.parseInt(i32, fields.next() orelse continue, 10) catch continue;
+        const comm = fields.rest();
+        try procs.append(alloc, .{ .pid = pid, .ppid = ppid, .agent = agentFromCommand(comm) });
+    }
+
+    var found: ?harness.Agent = null;
+    var changed = true;
+    var descendants = std.AutoHashMap(i32, void).init(alloc);
+    defer descendants.deinit();
+    try descendants.put(root_pid, {});
+    for (procs.items) |proc| {
+        if (proc.pid == root_pid) {
+            if (proc.agent) |agent| found = agent;
+            break;
+        }
+    }
+    while (changed) {
+        changed = false;
+        for (procs.items) |proc| {
+            if (descendants.contains(proc.pid)) continue;
+            if (descendants.contains(proc.ppid)) {
+                try descendants.put(proc.pid, {});
+                changed = true;
+                if (proc.agent) |agent| {
+                    if (found != null and found.? != agent) return null;
+                    found = agent;
+                }
+            }
+        }
+    }
+    return found;
+}
+
+fn agentFromCommand(command: []const u8) ?harness.Agent {
+    const base = std.fs.path.basename(std.mem.trim(u8, command, " \t\r\n"));
+    if (std.mem.eql(u8, base, "claude") or std.mem.eql(u8, base, "claude-code")) return .claude;
+    if (std.mem.eql(u8, base, "codex")) return .codex;
+    if (std.mem.eql(u8, base, "pi")) return .pi;
+    return null;
+}
+
+fn renderTranscriptJson(
+    alloc: std.mem.Allocator,
+    name: []const u8,
+    runs: []const TranscriptRun,
+    thinking: bool,
+) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(alloc);
+    const current_idx = if (runs.len == 0) 0 else runs.len - 1;
+    var current_report: ?harness.StateReport = null;
+    defer if (current_report) |*r| r.deinit(alloc);
+    var current_arr: ?[]u8 = null;
+    defer if (current_arr) |a| alloc.free(a);
+
+    var run_jsons: std.ArrayList([]u8) = .empty;
+    defer {
+        for (run_jsons.items) |j| alloc.free(j);
+        run_jsons.deinit(alloc);
+    }
+    var combined: std.ArrayList(u8) = .empty;
+    defer combined.deinit(alloc);
+    try combined.append(alloc, '[');
+    var first_combined = true;
+
+    for (runs, 0..) |run, idx| {
+        const one = try renderOneRunJson(alloc, run, thinking, &combined, &first_combined);
+        try run_jsons.append(alloc, one.json);
+        if (idx == current_idx) {
+            current_report = one.report;
+            current_arr = try alloc.dupe(u8, one.arr);
+        } else {
+            one.report.deinit(alloc);
+        }
+        alloc.free(one.arr);
+    }
+    try combined.appendSlice(alloc, "]\n");
+
+    const cr = current_report.?;
+    try out.appendSlice(alloc, "{\"session\":");
+    try appendJsonString(alloc, &out, name);
+    try out.appendSlice(alloc, ",\"agent\":");
+    try appendJsonString(alloc, &out, runs[current_idx].agent.id());
+    try out.appendSlice(alloc, ",\"state\":");
+    try appendJsonString(alloc, &out, cr.state.asStr());
+    if (cr.stop_reason) |s| {
+        try out.appendSlice(alloc, ",\"stop_reason\":");
+        try appendJsonString(alloc, &out, s);
+    }
+    if (cr.detail) |d| {
+        try out.appendSlice(alloc, ",\"detail\":");
+        try appendJsonString(alloc, &out, d);
+    }
+    try out.print(alloc, ",\"messages\":{d},\"transcript\":", .{cr.messages});
+    if (runs.len > 1) {
+        try out.appendSlice(alloc, combined.items);
+    } else {
+        try out.appendSlice(alloc, std.mem.trimRight(u8, current_arr.?, " \n"));
+    }
+    try out.appendSlice(alloc, ",\"runs\":[");
+    for (run_jsons.items, 0..) |j, idx| {
+        if (idx > 0) try out.append(alloc, ',');
+        try out.appendSlice(alloc, j);
+    }
+    try out.appendSlice(alloc, "],\"warnings\":[]}\n");
+    return out.toOwnedSlice(alloc);
+}
+
+const RenderedRun = struct {
+    json: []u8,
+    arr: []u8,
+    report: harness.StateReport,
+};
+
+fn renderOneRunJson(
+    alloc: std.mem.Allocator,
+    run: TranscriptRun,
+    thinking: bool,
+    combined: *std.ArrayList(u8),
+    first_combined: *bool,
+) !RenderedRun {
+    const t_path = try transcriptPathForRun(alloc, run);
+    defer if (t_path) |p| alloc.free(p);
+    const data = if (t_path) |p| (readTranscript(alloc, p) orelse try alloc.dupe(u8, "")) else try alloc.dupe(u8, "");
+    defer alloc.free(data);
+    var report = try run.agent.detect(alloc, data);
+    errdefer report.deinit(alloc);
+    const arr = try run.agent.dumpJson(alloc, data, thinking);
+    errdefer alloc.free(arr);
+    try appendJsonArrayItems(alloc, combined, arr, first_combined);
+
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(alloc);
+    try out.appendSlice(alloc, "{\"agent\":");
+    try appendJsonString(alloc, &out, run.agent.id());
+    try out.appendSlice(alloc, ",\"source\":");
+    try appendJsonString(alloc, &out, run.source.asStr());
+    try out.appendSlice(alloc, ",\"state\":");
+    try appendJsonString(alloc, &out, report.state.asStr());
+    try out.appendSlice(alloc, ",\"confidence\":");
+    try appendJsonString(alloc, &out, run.confidence.asStr());
+    try out.print(alloc, ",\"messages\":{d},\"transcript\":", .{report.messages});
+    try out.appendSlice(alloc, std.mem.trimRight(u8, arr, " \n"));
+    try out.append(alloc, '}');
+    return .{ .json = try out.toOwnedSlice(alloc), .arr = arr, .report = report };
+}
+
+fn appendJsonArrayItems(
+    alloc: std.mem.Allocator,
+    out: *std.ArrayList(u8),
+    arr_json: []const u8,
+    first: *bool,
+) !void {
+    const trimmed = std.mem.trim(u8, arr_json, " \t\r\n");
+    if (trimmed.len < 2 or trimmed[0] != '[' or trimmed[trimmed.len - 1] != ']') return;
+    const inner = std.mem.trim(u8, trimmed[1 .. trimmed.len - 1], " \t\r\n");
+    if (inner.len == 0) return;
+    if (!first.*) try out.append(alloc, ',');
+    try out.appendSlice(alloc, inner);
+    first.* = false;
+}
+
+fn renderTranscriptText(
+    alloc: std.mem.Allocator,
+    name: []const u8,
+    runs: []const TranscriptRun,
+    thinking: bool,
+) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(alloc);
+    for (runs, 0..) |run, idx| {
+        const t_path = try transcriptPathForRun(alloc, run);
+        defer if (t_path) |p| alloc.free(p);
+        const data = if (t_path) |p| (readTranscript(alloc, p) orelse try alloc.dupe(u8, "")) else try alloc.dupe(u8, "");
+        defer alloc.free(data);
+        var report = try run.agent.detect(alloc, data);
+        defer report.deinit(alloc);
+        if (idx > 0) try out.append(alloc, '\n');
+        try out.print(alloc, "{s} · {s} · {s}", .{ name, run.agent.id(), report.state.asStr() });
+        if (runs.len > 1) try out.print(alloc, " · run {d}/{d} · {s}", .{ idx + 1, runs.len, run.source.asStr() });
+        if (report.stop_reason) |s| try out.print(alloc, " ({s})", .{s});
+        if (report.detail) |d| try out.print(alloc, " - {s}", .{d});
+        try out.print(alloc, " · {d} message{s}\n\n", .{ report.messages, if (report.messages == 1) "" else "s" });
+        const text = try run.agent.dumpText(alloc, data, thinking);
+        defer alloc.free(text);
+        if (text.len == 0) {
+            try out.appendSlice(alloc, "(empty transcript)\n");
+        } else {
+            try out.appendSlice(alloc, text);
+            if (text[text.len - 1] != '\n') try out.append(alloc, '\n');
+        }
+    }
+    return out.toOwnedSlice(alloc);
+}
+
+fn transcriptErrorJson(alloc: std.mem.Allocator, code: []const u8, message: []const u8) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(alloc);
+    try out.appendSlice(alloc, "{\"error\":{\"code\":");
+    try appendJsonString(alloc, &out, code);
+    try out.appendSlice(alloc, ",\"message\":");
+    try appendJsonString(alloc, &out, message);
+    try out.appendSlice(alloc, ",\"warnings\":[");
+    try appendJsonString(alloc, &out, message);
+    try out.appendSlice(alloc, "]}}\n");
+    return out.toOwnedSlice(alloc);
+}
+
+fn readSourceFromId(id: []const u8) ReadSource {
+    inline for (@typeInfo(ReadSource).@"enum".fields) |field| {
+        if (std.mem.eql(u8, id, field.name)) return @enumFromInt(field.value);
+    }
+    return .history;
+}
+
+fn readConfidenceFromId(id: []const u8) ReadConfidence {
+    inline for (@typeInfo(ReadConfidence).@"enum".fields) |field| {
+        if (std.mem.eql(u8, id, field.name)) return @enumFromInt(field.value);
+    }
+    return .medium;
+}
+
+fn readStateFromId(id: []const u8) harness.SessionState {
+    inline for (@typeInfo(harness.SessionState).@"enum".fields) |field| {
+        if (std.mem.eql(u8, id, field.name)) return @enumFromInt(field.value);
+    }
+    return .unknown;
+}
+
+fn jsonI64(root: std.json.Value, key: []const u8) ?i64 {
+    if (root != .object) return null;
+    const value = root.object.get(key) orelse return null;
+    return switch (value) {
+        .integer => |n| @intCast(n),
+        else => null,
+    };
+}
+
+fn currentCwd(alloc: std.mem.Allocator) ![]u8 {
+    var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const cwd = posix.getcwd(&cwd_buf) catch ".";
+    return alloc.dupe(u8, cwd);
+}
+
+fn homeJoin(alloc: std.mem.Allocator, parts: []const []const u8) ![]u8 {
+    const home = posix.getenv("HOME") orelse return error.NoHome;
+    var all = try alloc.alloc([]const u8, parts.len + 1);
+    defer alloc.free(all);
+    all[0] = home;
+    for (parts, 0..) |part, idx| all[idx + 1] = part;
+    return std.fs.path.join(alloc, all);
+}
+
+fn statMtimeMs(path: []const u8) ?i64 {
+    const st = std.fs.cwd().statFile(path) catch return null;
+    return @intCast(@divFloor(st.mtime, std.time.ns_per_ms));
+}
+
+fn dupeOptMain(alloc: std.mem.Allocator, s: ?[]const u8) !?[]u8 {
+    return if (s) |v| try alloc.dupe(u8, v) else null;
 }
 
 /// Print a de-noised dump, ensuring a trailing newline for the human view.
@@ -1575,7 +2410,7 @@ fn dispatchHttp(
                     return handleResize(alloc, stream, workspace, want, req.body);
                 }
                 if (std.mem.eql(u8, action, "transcript") and std.mem.eql(u8, req.method, "GET")) {
-                    return handleTranscript(alloc, stream, workspace, want);
+                    return handleTranscript(alloc, stream, workspace, want, req.query);
                 }
                 if (std.mem.eql(u8, action, "events") and std.mem.eql(u8, req.method, "GET")) {
                     return handleEvents(alloc, stream, workspace, want, req.query);
@@ -1697,7 +2532,7 @@ fn handleListSessions(alloc: std.mem.Allocator, stream: std.net.Stream, workspac
         defer alloc.free(info.text);
         if (emitted) try out.append(alloc, ',');
         emitted = true;
-        try appendSessionInfoJson(alloc, &out, name, info, null);
+        try appendSessionInfoJson(alloc, &out, dir, name, info, null);
     }
     try out.appendSlice(alloc, "]}\n");
     return sendOwnedJson(alloc, stream, 200, &out);
@@ -1815,7 +2650,7 @@ fn handleSessionInfo(
     defer if (state) |s| alloc.free(s.text);
     var out: std.ArrayList(u8) = .empty;
     defer out.deinit(alloc);
-    try appendSessionInfoJson(alloc, &out, name, info, if (state) |s| s.event_seq else null);
+    try appendSessionInfoJson(alloc, &out, dir, name, info, if (state) |s| s.event_seq else null);
     try out.append(alloc, '\n');
     return sendOwnedJson(alloc, stream, 200, &out);
 }
@@ -1823,6 +2658,7 @@ fn handleSessionInfo(
 fn appendSessionInfoJson(
     alloc: std.mem.Allocator,
     out: *std.ArrayList(u8),
+    dir: []const u8,
     name: []const u8,
     info: SessionInfo,
     event_seq: ?u64,
@@ -1836,7 +2672,43 @@ fn appendSessionInfoJson(
     });
     try appendJsonString(alloc, out, info.title);
     if (event_seq) |seq| try out.print(alloc, ",\"cursor\":{d}", .{seq});
+    if (try cheapAgentInfo(alloc, dir, name)) |agent_info| {
+        try out.appendSlice(alloc, ",\"agent\":");
+        try appendJsonString(alloc, out, agent_info.agent.id());
+        try out.appendSlice(alloc, ",\"agent_state\":");
+        try appendJsonString(alloc, out, agent_info.state.asStr());
+        try out.appendSlice(alloc, ",\"agent_source\":");
+        try appendJsonString(alloc, out, agent_info.source.asStr());
+    }
     try out.append(alloc, '}');
+}
+
+const CheapAgentInfo = struct {
+    agent: harness.Agent,
+    state: harness.SessionState,
+    source: ReadSource,
+};
+
+fn cheapAgentInfo(alloc: std.mem.Allocator, dir: []const u8, name: []const u8) !?CheapAgentInfo {
+    var runs: std.ArrayList(TranscriptRun) = .empty;
+    defer deinitRunList(alloc, &runs);
+    try loadRunHistory(alloc, dir, name, &runs);
+    if (try sidecarRun(alloc, dir, name)) |run| try appendRunDedupe(alloc, &runs, run);
+    if (runs.items.len == 0) return null;
+    const idx = selectCurrentRun(runs.items, null, null) orelse return null;
+    const run = runs.items[idx];
+    var state = run.state;
+    const maybe_path = transcriptPathForRun(alloc, run) catch null;
+    if (maybe_path) |p| {
+        defer alloc.free(p);
+        if (readTranscript(alloc, p)) |data| {
+            defer alloc.free(data);
+            var report = try run.agent.detect(alloc, data);
+            defer report.deinit(alloc);
+            state = report.state;
+        }
+    }
+    return .{ .agent = run.agent, .state = state, .source = run.source };
 }
 
 fn handleRenameSession(
@@ -2024,57 +2896,34 @@ fn handleTranscript(
     stream: std.net.Stream,
     workspace: ?[]const u8,
     want: []const u8,
+    query: []const u8,
 ) !void {
     const dir = try workspaceDirHttp(alloc, workspace);
     defer alloc.free(dir);
     const name = resolveSessionResult(alloc, dir, want) catch |err| return sendResolveError(stream, err);
     defer alloc.free(name);
-    const body = liveTranscriptJson(alloc, dir, name, false) catch |err| switch (err) {
-        error.NotAgent => return sendError(stream, 404, "not_agent", "session was not started with --agent"),
+    const agent_override = if (queryParam(query, "agent")) |id| blk: {
+        const agent = harness.Agent.fromId(id) orelse
+            return sendError(stream, 400, "bad_agent", "unknown agent");
+        if (!agent.hasTranscript()) return sendError(stream, 400, "bad_agent", "agent has no transcript");
+        break :blk agent;
+    } else null;
+    const history = queryBool(query, "history") orelse false;
+    const current = queryBool(query, "current") orelse !history;
+    var resolved = resolveTranscriptRuns(alloc, dir, name, .{
+        .agent_override = agent_override,
+        .history = history and !current,
+        .current = current or !history,
+    }) catch |err| switch (err) {
+        error.NotAgent => return sendError(stream, 404, "not_agent", "no agent transcript found"),
         error.BadSidecar => return sendError(stream, 500, "bad_sidecar", "corrupt agent sidecar"),
+        error.AmbiguousTranscript => return sendError(stream, 409, "ambiguous_transcript", "multiple matching agent transcripts"),
         else => return err,
     };
+    defer resolved.deinit(alloc);
+    const body = try renderTranscriptJson(alloc, name, resolved.runs, false);
     defer alloc.free(body);
     return sendJson(stream, 200, body);
-}
-
-fn liveTranscriptJson(alloc: std.mem.Allocator, dir: []const u8, name: []const u8, thinking: bool) ![]u8 {
-    const sc_path = try paths.sidecarPath(alloc, dir, name);
-    defer alloc.free(sc_path);
-    const sc_data = readTranscript(alloc, sc_path) orelse return error.NotAgent;
-    defer alloc.free(sc_data);
-    const sc = harness.Sidecar.fromJson(alloc, sc_data) catch return error.BadSidecar;
-    defer sc.deinit(alloc);
-
-    const t_path = sc.agent.transcriptPath(alloc, sc) catch null;
-    defer if (t_path) |p| alloc.free(p);
-    const data = if (t_path) |p| (readTranscript(alloc, p) orelse try alloc.dupe(u8, "")) else try alloc.dupe(u8, "");
-    defer alloc.free(data);
-    var report = try sc.agent.detect(alloc, data);
-    defer report.deinit(alloc);
-
-    var out: std.ArrayList(u8) = .empty;
-    errdefer out.deinit(alloc);
-    try out.appendSlice(alloc, "{\"session\":");
-    try appendJsonString(alloc, &out, name);
-    try out.appendSlice(alloc, ",\"agent\":");
-    try appendJsonString(alloc, &out, sc.agent.id());
-    try out.appendSlice(alloc, ",\"state\":");
-    try appendJsonString(alloc, &out, report.state.asStr());
-    if (report.stop_reason) |s| {
-        try out.appendSlice(alloc, ",\"stop_reason\":");
-        try appendJsonString(alloc, &out, s);
-    }
-    if (report.detail) |d| {
-        try out.appendSlice(alloc, ",\"detail\":");
-        try appendJsonString(alloc, &out, d);
-    }
-    try out.print(alloc, ",\"messages\":{d},\"transcript\":", .{report.messages});
-    const arr = try sc.agent.dumpJson(alloc, data, thinking);
-    defer alloc.free(arr);
-    try out.appendSlice(alloc, std.mem.trimRight(u8, arr, " \n"));
-    try out.appendSlice(alloc, "}\n");
-    return out.toOwnedSlice(alloc);
 }
 
 fn handleEvents(
@@ -2159,6 +3008,13 @@ fn queryParam(query: []const u8, key: []const u8) ?[]const u8 {
         const eq = std.mem.indexOfScalar(u8, part, '=') orelse continue;
         if (std.mem.eql(u8, part[0..eq], key)) return part[eq + 1 ..];
     }
+    return null;
+}
+
+fn queryBool(query: []const u8, key: []const u8) ?bool {
+    const v = queryParam(query, key) orelse return null;
+    if (std.mem.eql(u8, v, "true") or std.mem.eql(u8, v, "1")) return true;
+    if (std.mem.eql(u8, v, "false") or std.mem.eql(u8, v, "0")) return false;
     return null;
 }
 
@@ -2460,6 +3316,65 @@ test "fmtIdle" {
     try std.testing.expectEqualStrings("12s", fmtIdle(&buf, 12_500));
     try std.testing.expectEqualStrings("5m", fmtIdle(&buf, 5 * 60_000));
     try std.testing.expectEqualStrings("2h", fmtIdle(&buf, 2 * 3_600_000));
+}
+
+test "transcript current ranking prefers detected process over stale sidecar" {
+    const runs = [_]TranscriptRun{
+        .{ .agent = .claude, .source = .sidecar, .confidence = .exact, .updated_at_ms = 10 },
+        .{ .agent = .codex, .source = .process, .confidence = .low, .updated_at_ms = 20 },
+    };
+    try std.testing.expectEqual(@as(?usize, 1), selectCurrentRun(&runs, null, .codex));
+}
+
+test "run history parse dedupes sidecar v1 records" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try tmp.dir.realpathAlloc(alloc, ".");
+    defer alloc.free(dir);
+
+    const sc: harness.Sidecar = .{
+        .agent = .claude,
+        .session_id = "sid-1",
+        .cwd = "/work",
+    };
+    appendRunHistorySidecar(alloc, dir, "s1", sc, .sidecar, .exact);
+    appendRunHistorySidecar(alloc, dir, "s1", sc, .sidecar, .exact);
+
+    var runs: std.ArrayList(TranscriptRun) = .empty;
+    defer deinitRunList(alloc, &runs);
+    try loadRunHistory(alloc, dir, "s1", &runs);
+    try std.testing.expectEqual(@as(usize, 1), runs.items.len);
+    try std.testing.expectEqual(harness.Agent.claude, runs.items[0].agent);
+    try std.testing.expectEqualStrings("sid-1", runs.items[0].session_id.?);
+    try std.testing.expectEqual(ReadSource.sidecar, runs.items[0].source);
+}
+
+test "sidecar v1 remains a transcript run candidate" {
+    const alloc = std.testing.allocator;
+    const data = "{\"agent\":\"codex\",\"session_store\":\"/tmp/codex-home\",\"cwd\":\"/work\"}";
+    const sc = try harness.Sidecar.fromJson(alloc, data);
+    defer sc.deinit(alloc);
+    const run = try runFromSidecar(alloc, sc, .sidecar, .exact);
+    defer run.deinit(alloc);
+    try std.testing.expectEqual(harness.Agent.codex, run.agent);
+    try std.testing.expectEqualStrings("/tmp/codex-home", run.session_store.?);
+    try std.testing.expect(run.transcript_key != null);
+}
+
+test "bounded cwd scan surfaces ambiguity instead of selecting by mtime" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.makePath("sessions/2026/06/24");
+    try tmp.dir.writeFile(.{ .sub_path = "sessions/2026/06/24/rollout-a.jsonl", .data = "{\"cwd\":\"/work\"}" });
+    try tmp.dir.writeFile(.{ .sub_path = "sessions/2026/06/24/rollout-b.jsonl", .data = "{\"cwd\":\"/work\"}" });
+    const root = try tmp.dir.realpathAlloc(alloc, "sessions");
+    defer alloc.free(root);
+    var runs: std.ArrayList(TranscriptRun) = .empty;
+    defer deinitRunList(alloc, &runs);
+    const matches = try scanJsonlTree(alloc, .codex, root, "/work", 0, .scan, &runs);
+    try std.testing.expectEqual(@as(usize, 2), matches);
 }
 
 test {

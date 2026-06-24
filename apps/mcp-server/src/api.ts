@@ -82,3 +82,16 @@ export function workspacePath(workspace: string): string {
 export function sessionPath(workspace: string, session: string): string {
   return `${workspacePath(workspace)}/sessions/${encodeURIComponent(session)}`;
 }
+
+export function transcriptPath(
+  workspace: string,
+  session: string,
+  options: { agent?: string; history?: boolean; current?: boolean } = {},
+): string {
+  const query = new URLSearchParams();
+  if (options.agent !== undefined) query.set("agent", options.agent);
+  if (options.history !== undefined) query.set("history", String(options.history));
+  if (options.current !== undefined) query.set("current", String(options.current));
+  const suffix = query.toString();
+  return `${sessionPath(workspace, session)}/transcript${suffix.length > 0 ? `?${suffix}` : ""}`;
+}

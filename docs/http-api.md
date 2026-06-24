@@ -138,7 +138,9 @@ Resize request:
 {"rows":40,"cols":120}
 ```
 
-Transcript responses match live `moo read <session> --json` semantics:
+Transcript responses match live `moo read <session> --json` semantics. Optional
+query parameters mirror the CLI: `agent=claude|codex|pi`, `history=true|false`,
+and `current=true|false`.
 
 ```json
 {
@@ -146,7 +148,18 @@ Transcript responses match live `moo read <session> --json` semantics:
   "agent": "claude",
   "state": "unknown",
   "messages": 0,
-  "transcript": []
+  "transcript": [],
+  "runs": [
+    {
+      "agent": "claude",
+      "source": "sidecar",
+      "state": "unknown",
+      "confidence": "exact",
+      "messages": 0,
+      "transcript": []
+    }
+  ],
+  "warnings": []
 }
 ```
 

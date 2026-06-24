@@ -36,6 +36,7 @@ const Tio = switch (@import("builtin").os.tag) {
 const Harness = struct {
     alloc: std.mem.Allocator,
     dir: []u8,
+    home: ?[]const u8 = null,
 
     fn init(alloc: std.mem.Allocator) !Harness {
         var random_bytes: [6]u8 = undefined;
@@ -115,6 +116,7 @@ const Harness = struct {
         // socket dir; the -w flag is exercised explicitly instead. A test that
         // wants the env path re-puts it after this remove via ws_env.
         env.remove("MOO_WORKSPACE");
+        if (self.home) |home| try env.put("HOME", home);
         if (ws_env) |ws| try env.put("MOO_WORKSPACE", ws);
         try env.put("MOO_DIR", self.dir);
 
@@ -261,6 +263,7 @@ const ApiServer = struct {
         env.remove("MOO_FOREGROUND");
         env.remove("MOO_LOG");
         env.remove("MOO_WORKSPACE");
+        if (h.home) |home| try env.put("HOME", home);
         try env.put("MOO_DIR", h.dir);
         if (token) |t| try env.put("MOO_TEST_API_TOKEN", t);
 
@@ -1580,7 +1583,7 @@ test "agent: read --agent de-noises a saved transcript file" {
         ,
     });
 
-    const read = try h.run(&.{ "read", "--agent", "codex", path, "--json" });
+    const read = try h.run(&.{ "read", "--agent", "codex", "--file", path, "--json" });
     defer alloc.free(read.stdout);
     defer alloc.free(read.stderr);
     try std.testing.expect(read.term.Exited == 0);
@@ -1588,7 +1591,117 @@ test "agent: read --agent de-noises a saved transcript file" {
     try std.testing.expect(std.mem.indexOf(u8, read.stdout, "hello CDX") != null);
 
     // A non-transcript agent kind is a usage error, matching the read help.
-    try h.runExit(&.{ "read", "--agent", "bash", path }, 2);
+    try h.runExit(&.{ "read", "--agent", "bash", "--file", path }, 2);
+}
+
+test "agent: non-agent session can be read with explicit agent override" {
+    const alloc = std.testing.allocator;
+    var h = try Harness.init(alloc);
+    h.home = h.dir;
+    defer h.deinit();
+
+    try h.startDetached("plainag", &.{"cat"});
+    var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const cwd = try std.fs.cwd().realpath(".", &cwd_buf);
+    const proj = try std.fs.path.join(alloc, &.{ h.dir, ".claude", "projects", "plain" });
+    defer alloc.free(proj);
+    try std.fs.cwd().makePath(proj);
+    const transcript_path = try std.fs.path.join(alloc, &.{ proj, "plain-session.jsonl" });
+    defer alloc.free(transcript_path);
+    const transcript = try std.fmt.allocPrint(
+        alloc,
+        \\{{"type":"user","cwd":"{s}","message":{{"content":"hello explicit"}}}}
+        \\{{"type":"assistant","message":{{"id":"m1","role":"assistant","stop_reason":"end_turn","content":[{{"type":"text","text":"reply EXPLICIT"}}]}}}}
+    ,
+        .{cwd},
+    );
+    defer alloc.free(transcript);
+    try std.fs.cwd().writeFile(.{ .sub_path = transcript_path, .data = transcript });
+
+    const read = try h.run(&.{ "read", "plainag", "--agent", "claude", "--json" });
+    defer alloc.free(read.stdout);
+    defer alloc.free(read.stderr);
+    try std.testing.expect(read.term.Exited == 0);
+    try std.testing.expect(std.mem.indexOf(u8, read.stdout, "\"agent\":\"claude\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, read.stdout, "reply EXPLICIT") != null);
+    try std.testing.expect(std.mem.indexOf(u8, read.stdout, h.dir) == null);
+}
+
+test "agent: handoff history surfaces claude then codex in one session" {
+    const alloc = std.testing.allocator;
+    var h = try Harness.init(alloc);
+    h.home = h.dir;
+    defer h.deinit();
+
+    const new = try h.run(&.{ "new", "handoff", "--agent", "claude", "-d", "--", "sh", "-c", "cat" });
+    defer alloc.free(new.stdout);
+    defer alloc.free(new.stderr);
+    try std.testing.expect(new.term.Exited == 0);
+    try h.waitSessionUp("handoff");
+
+    const sc_path = try std.fs.path.join(alloc, &.{ h.dir, "handoff.agent" });
+    defer alloc.free(sc_path);
+    const sc_data = try std.fs.cwd().readFileAlloc(alloc, sc_path, 1 << 16);
+    defer alloc.free(sc_data);
+    var parsed = try std.json.parseFromSlice(std.json.Value, alloc, sc_data, .{});
+    defer parsed.deinit();
+    const sid = parsed.value.object.get("session_id").?.string;
+
+    var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const cwd = try std.fs.cwd().realpath(".", &cwd_buf);
+
+    const claude_dir = try std.fs.path.join(alloc, &.{ h.dir, ".claude", "projects", "handoff" });
+    defer alloc.free(claude_dir);
+    try std.fs.cwd().makePath(claude_dir);
+    const claude_file = try std.fmt.allocPrint(alloc, "{s}/{s}.jsonl", .{ claude_dir, sid });
+    defer alloc.free(claude_file);
+    const claude_data = try std.fmt.allocPrint(
+        alloc,
+        \\{{"type":"user","cwd":"{s}","message":{{"content":"claude question"}}}}
+        \\{{"type":"assistant","message":{{"id":"m1","role":"assistant","stop_reason":"end_turn","content":[{{"type":"text","text":"reply CLAUDE"}}]}}}}
+    ,
+        .{cwd},
+    );
+    defer alloc.free(claude_data);
+    try std.fs.cwd().writeFile(.{ .sub_path = claude_file, .data = claude_data });
+
+    const codex_dir = try std.fs.path.join(alloc, &.{ h.dir, ".codex", "sessions", "2026", "06", "24" });
+    defer alloc.free(codex_dir);
+    try std.fs.cwd().makePath(codex_dir);
+    const codex_file = try std.fs.path.join(alloc, &.{ codex_dir, "rollout-handoff.jsonl" });
+    defer alloc.free(codex_file);
+    const codex_data = try std.fmt.allocPrint(
+        alloc,
+        \\{{"type":"event_msg","payload":{{"type":"user_message","message":"cwd {s} codex question"}}}}
+        \\{{"type":"event_msg","payload":{{"type":"agent_message","message":"reply CODEX"}}}}
+        \\{{"type":"event_msg","payload":{{"type":"task_complete"}}}}
+    ,
+        .{cwd},
+    );
+    defer alloc.free(codex_data);
+    try std.fs.cwd().writeFile(.{ .sub_path = codex_file, .data = codex_data });
+
+    const codex_read = try h.run(&.{ "read", "handoff", "--agent", "codex", "--json" });
+    defer alloc.free(codex_read.stdout);
+    defer alloc.free(codex_read.stderr);
+    try std.testing.expect(codex_read.term.Exited == 0);
+    try std.testing.expect(std.mem.indexOf(u8, codex_read.stdout, "reply CODEX") != null);
+
+    const history = try h.run(&.{ "read", "handoff", "--history", "--json" });
+    defer alloc.free(history.stdout);
+    defer alloc.free(history.stderr);
+    try std.testing.expect(history.term.Exited == 0);
+    try std.testing.expect(std.mem.indexOf(u8, history.stdout, "\"agent\":\"claude\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, history.stdout, "\"agent\":\"codex\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, history.stdout, "reply CLAUDE") != null);
+    try std.testing.expect(std.mem.indexOf(u8, history.stdout, "reply CODEX") != null);
+}
+
+test "agent: live claude codex pi smoke is opt-in" {
+    if (std.posix.getenv("RUN_AGENT_INTEGRATION") == null) return error.SkipZigTest;
+    // The live smoke is intentionally not run by default because it depends on
+    // local credentials and installed agent CLIs. Fixture tests above cover the
+    // transcript resolver; this gate documents the opt-in environment switch.
 }
 
 test "agent: rename moves the sidecar so read still resolves it" {
@@ -1795,6 +1908,7 @@ test "http api: drive wait screen" {
 test "http api: agent transcript" {
     const alloc = std.testing.allocator;
     var h = try Harness.init(alloc);
+    h.home = h.dir;
     defer h.deinit();
     var api = try ApiServer.start(&h, null);
     defer api.deinit();
@@ -1824,6 +1938,44 @@ test "http api: agent transcript" {
     defer cli_transcript.deinit(alloc);
     try expectStatus(cli_transcript, 200);
     try expectBodyContains(cli_transcript, "\"session\":\"cliag\"");
+
+    const plain = try api.request(
+        "POST",
+        "/v1/workspaces/@default/sessions",
+        "{\"name\":\"plainhttp\",\"argv\":[\"cat\"]}",
+        null,
+    );
+    defer plain.deinit(alloc);
+    try expectStatus(plain, 201);
+
+    var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const cwd = try std.fs.cwd().realpath(".", &cwd_buf);
+    const proj = try std.fs.path.join(alloc, &.{ h.dir, ".claude", "projects", "http" });
+    defer alloc.free(proj);
+    try std.fs.cwd().makePath(proj);
+    const transcript_path = try std.fs.path.join(alloc, &.{ proj, "http-session.jsonl" });
+    defer alloc.free(transcript_path);
+    const transcript_data = try std.fmt.allocPrint(
+        alloc,
+        \\{{"type":"user","cwd":"{s}","message":{{"content":"http question"}}}}
+        \\{{"type":"assistant","message":{{"id":"m1","role":"assistant","stop_reason":"end_turn","content":[{{"type":"text","text":"reply HTTP"}}]}}}}
+    ,
+        .{cwd},
+    );
+    defer alloc.free(transcript_data);
+    try std.fs.cwd().writeFile(.{ .sub_path = transcript_path, .data = transcript_data });
+
+    const override_transcript = try api.request(
+        "GET",
+        "/v1/workspaces/@default/sessions/plainhttp/transcript?agent=claude&history=true&current=false",
+        "",
+        null,
+    );
+    defer override_transcript.deinit(alloc);
+    try expectStatus(override_transcript, 200);
+    try expectBodyContains(override_transcript, "\"agent\":\"claude\"");
+    try expectBodyContains(override_transcript, "\"runs\":[");
+    try expectBodyContains(override_transcript, "reply HTTP");
 }
 
 test "http api: event cursors" {

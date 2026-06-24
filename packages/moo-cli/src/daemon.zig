@@ -439,6 +439,13 @@ pub const Daemon = struct {
                 }
             }
             conn.send(.ok, out.items);
+        } else if (std.mem.eql(u8, cmd, "pid")) {
+            if (self.liveWindow()) |w| {
+                var out: std.ArrayList(u8) = .empty;
+                defer out.deinit(self.alloc);
+                try out.print(self.alloc, "{d}", .{w.child_pid});
+                conn.send(.ok, out.items);
+            } else conn.send(.err, "no window");
         } else if (std.mem.eql(u8, cmd, "resize")) {
             if (argv.len != 3) {
                 conn.send(.err, "usage: resize <rows> <cols>");
@@ -524,10 +531,10 @@ pub const Daemon = struct {
             return;
         };
 
-        // Move the agent sidecar to the new name so `moo read` keeps working.
-        // The transcript store is referenced by absolute path inside the
-        // sidecar, so it stays put. Best-effort: a non-agent session has none.
-        renameSidecar(self.alloc, dir, self.opts.name, new_name);
+        // Move per-session metadata to the new name so `moo read` keeps
+        // working. The transcript store is referenced by absolute path in
+        // metadata/history, so it stays put. Best-effort.
+        renameMetadata(self.alloc, dir, self.opts.name, new_name);
 
         if (self.owned_name) |n| self.alloc.free(n);
         if (self.owned_socket_path) |p| self.alloc.free(p);
@@ -540,11 +547,23 @@ pub const Daemon = struct {
         conn.send(.ok, "");
     }
 
-    /// Best-effort move of `<old>.agent` → `<new>.agent` beside the socket.
-    fn renameSidecar(alloc: std.mem.Allocator, dir: []const u8, old: []const u8, new: []const u8) void {
-        const old_path = paths.sidecarPath(alloc, dir, old) catch return;
+    /// Best-effort move of session metadata files beside the socket.
+    fn renameMetadata(alloc: std.mem.Allocator, dir: []const u8, old: []const u8, new: []const u8) void {
+        renameOne(paths.sidecarPath, alloc, dir, old, new);
+        renameOne(paths.sessionMetaPath, alloc, dir, old, new);
+        renameOne(paths.runHistoryPath, alloc, dir, old, new);
+    }
+
+    fn renameOne(
+        comptime pathFn: fn (std.mem.Allocator, []const u8, []const u8) anyerror![]u8,
+        alloc: std.mem.Allocator,
+        dir: []const u8,
+        old: []const u8,
+        new: []const u8,
+    ) void {
+        const old_path = pathFn(alloc, dir, old) catch return;
         defer alloc.free(old_path);
-        const new_path = paths.sidecarPath(alloc, dir, new) catch return;
+        const new_path = pathFn(alloc, dir, new) catch return;
         defer alloc.free(new_path);
         std.fs.cwd().rename(old_path, new_path) catch {};
     }

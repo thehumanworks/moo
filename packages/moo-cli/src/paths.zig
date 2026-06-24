@@ -146,6 +146,21 @@ pub fn sidecarPath(alloc: std.mem.Allocator, dir: []const u8, name: []const u8) 
     return std.fs.path.join(alloc, &.{ dir, file });
 }
 
+/// Per-session launch metadata for all sessions: "<dir>/<name>.session".
+/// Records cheap, non-agent-specific context such as launch cwd and start time.
+pub fn sessionMetaPath(alloc: std.mem.Allocator, dir: []const u8, name: []const u8) ![]u8 {
+    const file = try std.fmt.allocPrint(alloc, "{s}.session", .{name});
+    defer alloc.free(file);
+    return std.fs.path.join(alloc, &.{ dir, file });
+}
+
+/// Append-only per-session agent run history: "<dir>/<name>.agents.jsonl".
+pub fn runHistoryPath(alloc: std.mem.Allocator, dir: []const u8, name: []const u8) ![]u8 {
+    const file = try std.fmt.allocPrint(alloc, "{s}.agents.jsonl", .{name});
+    defer alloc.free(file);
+    return std.fs.path.join(alloc, &.{ dir, file });
+}
+
 /// Per-session transcript store: "<dir>/<name>.store" (an isolated directory for
 /// agents that need one, e.g. codex's CODEX_HOME or pi's --session-dir).
 pub fn storeDir(alloc: std.mem.Allocator, dir: []const u8, name: []const u8) ![]u8 {
@@ -161,6 +176,14 @@ pub fn removeAgentFiles(alloc: std.mem.Allocator, dir: []const u8, name: []const
     if (sidecarPath(alloc, dir, name)) |sc| {
         defer alloc.free(sc);
         std.fs.cwd().deleteFile(sc) catch {};
+    } else |_| {}
+    if (sessionMetaPath(alloc, dir, name)) |meta| {
+        defer alloc.free(meta);
+        std.fs.cwd().deleteFile(meta) catch {};
+    } else |_| {}
+    if (runHistoryPath(alloc, dir, name)) |hist| {
+        defer alloc.free(hist);
+        std.fs.cwd().deleteFile(hist) catch {};
     } else |_| {}
     if (storeDir(alloc, dir, name)) |store| {
         defer alloc.free(store);

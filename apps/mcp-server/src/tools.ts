@@ -2,7 +2,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 
 import type { JsonValue, MooApiClient } from "./api.js";
-import { sessionPath, workspacePath } from "./api.js";
+import { sessionPath, transcriptPath, workspacePath } from "./api.js";
 
 type ToolResult = {
   content: Array<{ type: "text"; text: string }>;
@@ -162,10 +162,20 @@ export function registerMooTools(server: McpServer, client: MooApiClient): void 
     "moo_get_transcript",
     {
       title: "Get Moo Agent Transcript",
-      description: "Read live agent transcript JSON for an agent-backed session.",
-      inputSchema: sessionSchema,
+      description: "Read live agent transcript JSON for a moo session.",
+      inputSchema: sessionSchema.extend({
+        agent: z.enum(["claude", "codex", "pi"]).optional(),
+        history: z.boolean().optional(),
+        current: z.boolean().optional(),
+      }),
     },
-    async ({ workspace, session }) => result(await client.request("GET", `${sessionPath(workspace, session)}/transcript`)),
+    async ({ workspace, session, agent, history, current }) => result(
+      await client.request("GET", transcriptPath(workspace, session, compact({ agent, history, current }) as {
+        agent?: string;
+        history?: boolean;
+        current?: boolean;
+      })),
+    ),
   );
 
   server.registerTool(

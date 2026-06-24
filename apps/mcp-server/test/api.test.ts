@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-import { MooApiClient, MooApiError, sessionPath, workspacePath } from "../src/api.js";
+import { MooApiClient, MooApiError, sessionPath, transcriptPath, workspacePath } from "../src/api.js";
 
 describe("path helpers", () => {
   test("maps default workspace to @default", () => {
@@ -10,6 +10,11 @@ describe("path helpers", () => {
 
   test("encodes workspace and session path segments", () => {
     expect(sessionPath("proj.a", "build/one")).toBe("/v1/workspaces/proj.a/sessions/build%2Fone");
+  });
+
+  test("adds transcript query options for MCP parity", () => {
+    expect(transcriptPath("proj", "bot", { agent: "codex", history: true, current: false }))
+      .toBe("/v1/workspaces/proj/sessions/bot/transcript?agent=codex&history=true&current=false");
   });
 });
 

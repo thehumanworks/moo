@@ -2979,6 +2979,7 @@ const Ui = struct {
             return;
         };
         self.alloc.free(result.text);
+        std.fs.cwd().deleteFile(sock) catch {};
         self.setMessage("killed {s}", .{name});
         self.refreshSessions() catch {};
     }

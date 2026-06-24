@@ -358,8 +358,8 @@ pub const commands = [_]Entry{
     .{
         .name = "read",
         .body =
-        \\usage: moo read <name> [--json] [--thinking]
-        \\       moo read --agent <agent> <file> [--json] [--thinking]
+        \\usage: moo read <name> [--agent <agent>] [--history|--current] [--json] [--thinking]
+        \\       moo read --file <path> --agent <agent> [--json] [--thinking]
         \\
         \\Read a coding agent's transcript, de-noised: the human prompts,
         \\the agent's replies, and its tool calls, with injected and
@@ -367,11 +367,11 @@ pub const commands = [_]Entry{
         \\rendered screen) this reads the agent's own JSONL log, so it is
         \\stable regardless of what the TUI is showing.
         \\
-        \\With a session name, the session must have been started with
-        \\'--agent'; a one-line status header reports what the agent is
-        \\doing (idle, running, waiting_for_input, ...). With '--agent
-        \\<agent>' and a file path, any saved transcript is de-noised
-        \\directly, no session required.
+        \\With a session name, moo uses launch sidecars, run history,
+        \\live process detection, and bounded transcript-store scans to
+        \\find the active agent transcript. '--agent <agent>' is an
+        \\explicit session override for handoffs or sessions not
+        \\started with 'moo new --agent'.
         \\
         \\flags:
         \\  --json       emit structured JSON instead of text. Session
@@ -379,9 +379,11 @@ pub const commands = [_]Entry{
         \\               "transcript":[...]}. File form: just the array.
         \\  --thinking   include the agent's reasoning blocks (omitted by
         \\               default; never available for codex)
-        \\  --agent <a>  read a transcript file directly (claude, codex,
-        \\               pi); pass the path positionally or via --file
-        \\  --file <p>   the transcript file (alternative to positional)
+        \\  --agent <a>  session form: force claude, codex, or pi
+        \\               discovery. File form: transcript kind.
+        \\  --history    include all known agent runs for the session
+        \\  --current    include only the selected/current run
+        \\  --file <p>   read a saved transcript file directly
         \\  -w, --workspace <name>   target a session in a named workspace
         \\               (see 'moo help workspaces')
         \\
@@ -394,7 +396,9 @@ pub const commands = [_]Entry{
         \\  moo read bot                 status + conversation, as text
         \\  moo read bot --json | jq .   structured, for scripts
         \\  moo read cx --thinking       include reasoning
-        \\  moo read --agent codex rollout.jsonl   dump a saved log
+        \\  moo read bot --agent codex   force Codex discovery
+        \\  moo read bot --history --json  include handoff runs
+        \\  moo read --file rollout.jsonl --agent codex   dump a saved log
         \\
         ,
     },
@@ -604,7 +608,7 @@ pub const topics = [_]Entry{
         \\    'running', not a waiting state (true for all three).
         \\  - codex encrypts its reasoning, so --thinking is a no-op there.
         \\  - 'moo read <name>' needs a live session; to read a finished
-        \\    or saved log use 'moo read --agent <agent> <file>'.
+        \\    or saved log use 'moo read --file <path> --agent <agent>'.
         \\
         ,
     },
