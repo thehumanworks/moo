@@ -10,6 +10,7 @@ const harness = @import("harness.zig");
 const help = @import("help.zig");
 const paths = @import("paths.zig");
 const protocol = @import("protocol.zig");
+const slash = @import("slash.zig");
 const ui = @import("ui.zig");
 
 pub const version = "0.5.20";
@@ -94,6 +95,7 @@ pub fn main() !void {
     if (eql(cmd, "ls") or eql(cmd, "list")) return cmdLs(alloc, rest);
     if (eql(cmd, "workspace") or eql(cmd, "ws")) return cmdWorkspace(alloc, rest);
     if (eql(cmd, "send")) return cmdSend(alloc, rest);
+    if (eql(cmd, "slash")) return cmdSlash(alloc, rest);
     if (eql(cmd, "peek")) return cmdPeek(alloc, rest);
     if (eql(cmd, "read")) return cmdRead(alloc, rest);
     if (eql(cmd, "wait")) return cmdWait(alloc, rest);
@@ -1075,6 +1077,86 @@ fn cmdSend(alloc: std.mem.Allocator, args: []const [:0]const u8) !void {
     }
 
     const result = try mustControl(alloc, dir, name, &.{ "send", payload.items });
+    defer alloc.free(result.text);
+    if (!result.ok) fail(exit_runtime, "{s}", .{result.text});
+}
+
+fn slashUsageMessage(err: slash.ComposeError, command: slash.Command) []const u8 {
+    return switch (err) {
+        slash.ComposeError.PromptRequired => "goal requires --prompt or --clear",
+        slash.ComposeError.PromptNotAllowed => "clear does not accept --prompt",
+        slash.ComposeError.ClearNotAllowed => switch (command) {
+            .compact => "compact does not accept --clear",
+            .clear => "clear does not accept --clear",
+            .goal => unreachable,
+        },
+        slash.ComposeError.InvalidGoal => "goal accepts either --prompt or --clear, not both",
+    };
+}
+
+fn slashPayload(alloc: std.mem.Allocator, line: []const u8) ![]u8 {
+    if (std.mem.indexOfScalar(u8, line, 0) != null) return error.NulInput;
+    var payload: std.ArrayList(u8) = .empty;
+    errdefer payload.deinit(alloc);
+    try payload.appendSlice(alloc, line);
+    try payload.append(alloc, '\r');
+    return payload.toOwnedSlice(alloc);
+}
+
+fn cmdSlash(alloc: std.mem.Allocator, args: []const [:0]const u8) !void {
+    var name_arg: ?[]const u8 = null;
+    var command_arg: ?[]const u8 = null;
+    var prompt: ?[]const u8 = null;
+    var clear = false;
+    var ws_flag: ?[]const u8 = null;
+
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        const arg = args[i];
+        if (isHelpFlag(arg)) return printHelpPage("slash");
+        if (std.mem.eql(u8, arg, "--clear")) {
+            clear = true;
+        } else if (flagValue("slash", "--prompt", args, &i)) |v| {
+            prompt = v;
+        } else if (flagValue("slash", "--workspace", args, &i)) |v| {
+            ws_flag = v;
+        } else if (flagValue("slash", "-w", args, &i)) |v| {
+            ws_flag = v;
+        } else if (arg.len > 0 and arg[0] == '-') {
+            usageFail("slash", "unknown flag '{s}'", .{arg});
+        } else if (name_arg == null) {
+            name_arg = arg;
+        } else if (command_arg == null) {
+            command_arg = arg;
+        } else {
+            usageFail("slash", "unexpected argument '{s}'", .{arg});
+        }
+    }
+
+    const want = name_arg orelse usageFail("slash", "a session name is required", .{});
+    const cmd_name = command_arg orelse
+        usageFail("slash", "a command is required (compact, clear, or goal)", .{});
+    const command = slash.Command.parse(cmd_name) orelse
+        usageFail("slash", "unknown command '{s}' (expected compact, clear, or goal)", .{cmd_name});
+
+    const line = slash.compose(alloc, command, .{ .prompt = prompt, .clear = clear }) catch |err| switch (err) {
+        error.OutOfMemory => return err,
+        else => |e| usageFail("slash", "{s}", .{slashUsageMessage(e, command)}),
+    };
+    defer alloc.free(line);
+
+    const dir = try workspaceDir("slash", alloc, ws_flag);
+    defer alloc.free(dir);
+    const name = try resolveSession(alloc, dir, want);
+    defer alloc.free(name);
+
+    const payload = slashPayload(alloc, line) catch |err| switch (err) {
+        error.NulInput => usageFail("slash", "cannot send NUL bytes", .{}),
+        else => |e| return e,
+    };
+    defer alloc.free(payload);
+
+    const result = try mustControl(alloc, dir, name, &.{ "send", payload });
     defer alloc.free(result.text);
     if (!result.ok) fail(exit_runtime, "{s}", .{result.text});
 }
@@ -2556,6 +2638,9 @@ fn dispatchHttp(
                 if (std.mem.eql(u8, action, "input") and std.mem.eql(u8, req.method, "POST")) {
                     return handleInput(alloc, stream, workspace, want, req.body);
                 }
+                if (std.mem.eql(u8, action, "slash") and std.mem.eql(u8, req.method, "POST")) {
+                    return handleSlash(alloc, stream, workspace, want, req.body);
+                }
                 if (std.mem.eql(u8, action, "screen") and std.mem.eql(u8, req.method, "GET")) {
                     return handleScreen(alloc, stream, workspace, want, req.query);
                 }
@@ -3006,6 +3091,55 @@ fn handleInput(
     defer alloc.free(result.text);
     if (!result.ok) return sendError(stream, 500, "input_failed", result.text);
     return sendJson(stream, 200, "{\"sent\":true}\n");
+}
+
+fn handleSlash(
+    alloc: std.mem.Allocator,
+    stream: std.net.Stream,
+    workspace: ?[]const u8,
+    want: []const u8,
+    body: []const u8,
+) !void {
+    var parsed = std.json.parseFromSlice(std.json.Value, alloc, body, .{}) catch
+        return sendError(stream, 400, "bad_json", "request body must be JSON");
+    defer parsed.deinit();
+    if (parsed.value != .object) return sendError(stream, 400, "bad_json", "request body must be a JSON object");
+
+    const command_name = jsonString(parsed.value, "command") orelse
+        return sendError(stream, 400, "bad_command", "command is required");
+    const command = slash.Command.parse(command_name) orelse
+        return sendError(stream, 400, "bad_command", "unknown command");
+    const prompt = jsonString(parsed.value, "prompt");
+    const clear = jsonBool(parsed.value, "clear") orelse false;
+
+    const line = slash.compose(alloc, command, .{ .prompt = prompt, .clear = clear }) catch |err| switch (err) {
+        error.OutOfMemory => return err,
+        else => |e| return sendError(stream, 400, "bad_slash", slashUsageMessage(e, command)),
+    };
+    defer alloc.free(line);
+
+    const dir = try workspaceDirHttp(alloc, workspace);
+    defer alloc.free(dir);
+    const name = resolveSessionResult(alloc, dir, want) catch |err| return sendResolveError(stream, err);
+    defer alloc.free(name);
+    const payload = slashPayload(alloc, line) catch |err| switch (err) {
+        error.NulInput => return sendError(stream, 400, "nul_input", "NUL bytes are not supported by v1 slash"),
+        else => return err,
+    };
+    defer alloc.free(payload);
+
+    const result = try controlSession(alloc, dir, name, &.{ "send", payload });
+    defer alloc.free(result.text);
+    if (!result.ok) return sendError(stream, 500, "slash_failed", result.text);
+
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(alloc);
+    try out.appendSlice(alloc, "{\"sent\":true,\"command\":");
+    try appendJsonString(alloc, &out, command.asStr());
+    try out.appendSlice(alloc, ",\"line\":");
+    try appendJsonString(alloc, &out, line);
+    try out.appendSlice(alloc, "}\n");
+    return sendOwnedJson(alloc, stream, 200, &out);
 }
 
 fn handleScreen(
@@ -3586,4 +3720,5 @@ test {
     _ = @import("help.zig");
     _ = @import("ui.zig");
     _ = @import("harness.zig");
+    _ = @import("slash.zig");
 }

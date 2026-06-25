@@ -47,6 +47,7 @@ try {
     "moo_remove_all_workspaces",
     "moo_create_session",
     "moo_send_input",
+    "moo_send_slash_command",
     "moo_poll_events",
   ]) {
     if (!names.has(required)) throw new Error(`missing tool: ${required}`);

@@ -33,6 +33,7 @@ pub const overview =
     \\
     \\  Interaction
     \\    send <name> [flags]          type into a session
+    \\    slash <name> <cmd> [flags]   send an agent harness slash command
     \\    peek <name>                  print the session's screen
     \\    read <name>                  read an agent session's transcript
     \\    wait <name>                  block until output matches or settles
@@ -349,6 +350,34 @@ pub const commands = [_]Entry{
         ,
     },
     .{
+        .name = "slash",
+        .body =
+        \\usage: moo slash <name> <compact|clear|goal> [--prompt <text>] [--clear] [flags]
+        \\
+        \\Send an agent harness slash command into a session. The composed
+        \\line is typed literally and Enter is appended automatically.
+        \\
+        \\commands:
+        \\  compact [--prompt <text>]   send /compact or /compact <prompt>
+        \\  clear                       send /clear
+        \\  goal --prompt <text>        send /goal <prompt>
+        \\  goal --clear                send /goal clear
+        \\
+        \\flags:
+        \\  --prompt <text>  optional focus text (compact) or goal text (goal)
+        \\  --clear          clear the current goal (goal only)
+        \\  -w, --workspace <name>   target a session in a named workspace
+        \\                 (see 'moo help workspaces')
+        \\
+        \\examples:
+        \\  moo slash bot compact --prompt 'focus on tests'
+        \\  moo slash bot clear
+        \\  moo slash bot goal --prompt 'ship the feature'
+        \\  moo slash bot goal --clear
+        \\
+        ,
+    },
+    .{
         .name = "peek",
         .body =
         \\usage: moo peek <name> [--scrollback] [--json]
@@ -554,6 +583,14 @@ pub const topics = [_]Entry{
         \\  send is literal: no escapes, no implicit newline, no
         \\  quoting layer. --enter submits; --key Enter,C-c,Up names
         \\  control keys; stdin mode is binary safe.
+        \\
+        \\agent slash commands:
+        \\  moo slash <name> compact [--prompt <text>]   /compact [prompt]
+        \\  moo slash <name> clear                       /clear
+        \\  moo slash <name> goal --prompt <text>        /goal <text>
+        \\  moo slash <name> goal --clear                /goal clear
+        \\  Enter is always appended. The HTTP API exposes the same
+        \\  commands at POST .../sessions/{session}/slash.
         \\
         \\machine-readable output:
         \\  moo ls --json    [{"name","attached","idle_ms","title"}]

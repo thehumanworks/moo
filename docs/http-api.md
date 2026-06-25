@@ -56,6 +56,7 @@ Workspace path segments use the existing moo workspace name rules.
 | `PATCH` | `/v1/workspaces/{workspace}/sessions/{session}` | Rename one session |
 | `DELETE` | `/v1/workspaces/{workspace}/sessions/{session}` | Terminate one session |
 | `POST` | `/v1/workspaces/{workspace}/sessions/{session}/input` | Send input |
+| `POST` | `/v1/workspaces/{workspace}/sessions/{session}/slash` | Send agent harness slash command |
 | `GET` | `/v1/workspaces/{workspace}/sessions/{session}/screen` | Read rendered screen |
 | `POST` | `/v1/workspaces/{workspace}/sessions/{session}/wait` | Wait for text or idle |
 | `POST` | `/v1/workspaces/{workspace}/sessions/{session}/resize` | Resize the PTY |
@@ -133,6 +134,27 @@ Input request:
 Also accepted: `{"key":"C-c"}`, `{"keys":["Up","Enter"]}`, and
 `{"base64":"...","enter":true}`. NUL bytes are rejected because the current
 daemon control protocol uses NUL-separated argv payloads.
+
+Slash request:
+
+```json
+{"command":"compact","prompt":"focus on tests"}
+```
+
+Commands:
+
+| `command` | Body | Typed line |
+| --- | --- | --- |
+| `compact` | optional `"prompt"` | `/compact` or `/compact <prompt>` |
+| `clear` | none | `/clear` |
+| `goal` | `"prompt":"<text>"` | `/goal <text>` |
+| `goal` | `"clear":true` | `/goal clear` |
+
+Enter is always appended. Response:
+
+```json
+{"sent":true,"command":"compact","line":"/compact focus on tests"}
+```
 
 Screen response:
 
@@ -249,6 +271,10 @@ curl -sS -X POST "$API/v1/workspaces/proj/sessions" \
 curl -sS -X POST "$API/v1/workspaces/proj/sessions/build/input" \
   -H 'Content-Type: application/json' \
   -d '{"text":"echo READY","enter":true}'
+
+curl -sS -X POST "$API/v1/workspaces/proj/sessions/build/slash" \
+  -H 'Content-Type: application/json' \
+  -d '{"command":"goal","prompt":"fix the build"}'
 
 curl -sS -X POST "$API/v1/workspaces/proj/sessions/build/wait" \
   -H 'Content-Type: application/json' \
