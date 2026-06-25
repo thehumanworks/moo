@@ -161,6 +161,13 @@ pub fn runHistoryPath(alloc: std.mem.Allocator, dir: []const u8, name: []const u
     return std.fs.path.join(alloc, &.{ dir, file });
 }
 
+/// Per-session send ledger for draft text moo injected without Enter (Codex etc.).
+pub fn sendLedgerPath(alloc: std.mem.Allocator, dir: []const u8, name: []const u8) ![]u8 {
+    const file = try std.fmt.allocPrint(alloc, "{s}.send-ledger", .{name});
+    defer alloc.free(file);
+    return std.fs.path.join(alloc, &.{ dir, file });
+}
+
 /// Per-session transcript store: "<dir>/<name>.store" (an isolated directory for
 /// agents that need one, e.g. codex's CODEX_HOME or pi's --session-dir).
 pub fn storeDir(alloc: std.mem.Allocator, dir: []const u8, name: []const u8) ![]u8 {
@@ -281,6 +288,10 @@ pub fn removeAgentFiles(alloc: std.mem.Allocator, dir: []const u8, name: []const
     if (storeDir(alloc, dir, name)) |store| {
         defer alloc.free(store);
         std.fs.cwd().deleteTree(store) catch {};
+    } else |_| {}
+    if (sendLedgerPath(alloc, dir, name)) |ledger| {
+        defer alloc.free(ledger);
+        std.fs.cwd().deleteFile(ledger) catch {};
     } else |_| {}
 }
 

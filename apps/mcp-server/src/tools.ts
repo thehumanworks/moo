@@ -145,6 +145,9 @@ export function registerMooTools(server: McpServer, client: MooApiClient): void 
         enter: z.boolean().optional().describe(
           "Append Enter after the payload. Defaults to true when text is sent; pass false to suppress.",
         ),
+        force: z.boolean().optional().describe(
+          "Send even when unsubmitted prompt text is detected in an agent harness session.",
+        ),
       }),
     },
     async ({ workspace, session, ...body }) => result(await client.request("POST", `${sessionPath(workspace, session)}/input`, body)),
@@ -159,6 +162,9 @@ export function registerMooTools(server: McpServer, client: MooApiClient): void 
         command: z.enum(["compact", "clear", "goal"]),
         prompt: z.string().optional(),
         clear: z.boolean().optional(),
+        force: z.boolean().optional().describe(
+          "Send even when unsubmitted prompt text is detected in an agent harness session.",
+        ),
       }),
     },
     async ({ workspace, session, ...body }) => result(

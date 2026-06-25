@@ -343,6 +343,7 @@ pub const commands = [_]Entry{
         \\flags:
         \\  --text <text>  the text to type (Enter is appended by default)
         \\  --no-enter     do not append Enter after --text
+        \\  --force        send even when unsubmitted prompt text is detected
         \\  --key <list>   send named keys, comma separated:
         \\                 Enter, Tab, Escape, Space, Backspace,
         \\                 Up, Down, Left, Right, Home, End, C-a..C-z.
@@ -376,6 +377,7 @@ pub const commands = [_]Entry{
         \\flags:
         \\  --prompt <text>  optional focus text (compact) or goal text (goal)
         \\  --clear          clear the current goal (goal only)
+        \\  --force          send even when unsubmitted prompt text is detected
         \\  -w, --workspace <name>   target a session in a named workspace
         \\                 (see 'moo help workspaces')
         \\
@@ -610,6 +612,7 @@ pub const topics = [_]Entry{
         \\exit codes:
         \\  0 success    1 error    2 usage error
         \\  3 no such session       4 wait timed out
+        \\  5 unsubmitted prompt text (use --force on send/slash)
         \\
         \\tips:
         \\  - Sessions are cheap; use one session per task.

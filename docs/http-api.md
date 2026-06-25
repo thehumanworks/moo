@@ -148,9 +148,16 @@ Input request:
 ```
 
 `enter` defaults to `true` when `text` is present; pass `"enter":false` to
-suppress. Also accepted: `{"key":"C-c"}`, `{"keys":["Up","Enter"]}`, and
+suppress. Pass `"force":true` to send even when unsubmitted prompt text is
+detected in an agent harness session (see
+[pending-input-detection-prd.md](pending-input-detection-prd.md)). Also accepted:
+`{"key":"C-c"}`, `{"keys":["Up","Enter"]}`, and
 `{"base64":"..."}`. NUL bytes are rejected because the current
 daemon control protocol uses NUL-separated argv payloads.
+
+When unsubmitted draft text is detected with high confidence, input returns
+**409** with `"code":"pending_input"` and a `"pending"` object (`agent`,
+`preview`, `reason`).
 
 Slash request:
 
@@ -166,6 +173,9 @@ Commands:
 | `clear` | none | `/clear` |
 | `goal` | `"prompt":"<text>"` | `/goal <text>` |
 | `goal` | `"clear":true` | `/goal clear` |
+
+Pass `"force":true` to send even when unsubmitted prompt text is detected.
+Returns **409** `"pending_input"` when blocked (same as input).
 
 Enter is always appended. Response:
 

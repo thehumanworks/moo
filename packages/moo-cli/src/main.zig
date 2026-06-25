@@ -11,6 +11,7 @@ const help = @import("help.zig");
 const paths = @import("paths.zig");
 const protocol = @import("protocol.zig");
 const slash = @import("slash.zig");
+const pending_input = @import("pending_input.zig");
 const ui = @import("ui.zig");
 
 pub const version = "0.5.20";
@@ -44,6 +45,7 @@ const exit_runtime: u8 = 1;
 const exit_usage: u8 = 2;
 const exit_no_session: u8 = 3;
 const exit_timeout: u8 = 4;
+const exit_pending_input: u8 = 5;
 
 fn fail(code: u8, comptime fmt: []const u8, args: anytype) noreturn {
     std.debug.print("moo: " ++ fmt ++ "\n", args);
@@ -1067,12 +1069,126 @@ fn cutTab(rest: *[]const u8) ?[]const u8 {
     return field;
 }
 
+fn payloadAppendsEnter(payload: []const u8, has_text: bool, no_enter: bool, keys_arg: ?[]const u8) bool {
+    if (has_text and !no_enter) return true;
+    if (keys_arg) |list| {
+        var it = std.mem.splitScalar(u8, list, ',');
+        while (it.next()) |key_name| {
+            if (key_name.len == 0) continue;
+            if (std.ascii.eqlIgnoreCase(key_name, "enter")) return true;
+        }
+    }
+    _ = payload;
+    return false;
+}
+
+fn harnessAgentForSession(alloc: std.mem.Allocator, dir: []const u8, name: []const u8) ?harness.Agent {
+    const path = paths.sidecarPath(alloc, dir, name) catch return null;
+    defer alloc.free(path);
+    const data = readTranscript(alloc, path) orelse return null;
+    defer alloc.free(data);
+    const sc = harness.Sidecar.fromJson(alloc, data) catch return null;
+    defer sc.deinit(alloc);
+    return sc.agent;
+}
+
+fn peekSessionScreen(alloc: std.mem.Allocator, dir: []const u8, name: []const u8) !?pending_input.Peek {
+    const result = try controlSession(alloc, dir, name, &.{ "peek", "screen" });
+    defer alloc.free(result.text);
+    if (!result.ok) return null;
+    return pending_input.parsePeek(result.text);
+}
+
+fn failPendingInput(name: []const u8, agent: harness.Agent, preview: []const u8) noreturn {
+    fail(
+        exit_pending_input,
+        "unsubmitted prompt text in session '{s}' ({s}): \"{s}\"\nmoo: re-run with --force to send anyway",
+        .{ name, agent.id(), preview },
+    );
+}
+
+fn enforcePendingInputGateCli(
+    alloc: std.mem.Allocator,
+    dir: []const u8,
+    name: []const u8,
+    append_enter: bool,
+    force: bool,
+) !void {
+    const agent = harnessAgentForSession(alloc, dir, name);
+    const peek = if (append_enter and !force and agent != null)
+        try peekSessionScreen(alloc, dir, name)
+    else
+        null;
+    const ledger = if (append_enter and !force)
+        try pending_input.loadLedgerDraft(alloc, dir, name)
+    else
+        null;
+    defer if (ledger) |draft| alloc.free(draft);
+
+    const blocked = try pending_input.gate(alloc, agent, peek, ledger, .{
+        .append_enter = append_enter,
+        .force = force,
+    });
+    if (blocked) |pending| {
+        defer pending.deinit(alloc);
+        failPendingInput(name, agent.?, pending.preview);
+    }
+}
+
+fn enforcePendingInputGateHttp(
+    alloc: std.mem.Allocator,
+    stream: std.net.Stream,
+    dir: []const u8,
+    name: []const u8,
+    append_enter: bool,
+    force: bool,
+) !void {
+    const agent = harnessAgentForSession(alloc, dir, name);
+    const peek = if (append_enter and !force and agent != null)
+        try peekSessionScreen(alloc, dir, name)
+    else
+        null;
+    const ledger = if (append_enter and !force)
+        try pending_input.loadLedgerDraft(alloc, dir, name)
+    else
+        null;
+    defer if (ledger) |draft| alloc.free(draft);
+
+    const blocked = try pending_input.gate(alloc, agent, peek, ledger, .{
+        .append_enter = append_enter,
+        .force = force,
+    });
+    if (blocked) |pending| {
+        defer pending.deinit(alloc);
+        return sendPendingInputError(stream, agent.?, pending);
+    }
+}
+
+fn sendPendingInputError(
+    stream: std.net.Stream,
+    agent: harness.Agent,
+    pending: pending_input.PendingInput,
+) !void {
+    const alloc = std.heap.c_allocator;
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(alloc);
+    try out.appendSlice(alloc, "{\"error\":{\"code\":\"pending_input\",\"message\":\"unsubmitted prompt text detected; pass force=true to send anyway\",\"pending\":{\"agent\":");
+    try appendJsonString(alloc, &out, agent.id());
+    try out.appendSlice(alloc, ",\"preview\":");
+    try appendJsonString(alloc, &out, pending.preview);
+    try out.appendSlice(alloc, ",\"reason\":");
+    try appendJsonString(alloc, &out, pending.reason);
+    try out.appendSlice(alloc, "}}}\n");
+    return sendJson(stream, 409, out.items);
+}
+
 fn cmdSend(alloc: std.mem.Allocator, args: []const [:0]const u8) !void {
     var name_arg: ?[]const u8 = null;
     var text: ?[]const u8 = null;
     var keys_arg: ?[]const u8 = null;
     var no_enter = false;
     var stdin = false;
+    var force = false;
     var ws_flag: ?[]const u8 = null;
 
     var i: usize = 0;
@@ -1083,6 +1199,8 @@ fn cmdSend(alloc: std.mem.Allocator, args: []const [:0]const u8) !void {
             no_enter = true;
         } else if (std.mem.eql(u8, arg, "--stdin")) {
             stdin = true;
+        } else if (std.mem.eql(u8, arg, "--force")) {
+            force = true;
         } else if (flagValue("send", "--text", args, &i)) |v| {
             text = v;
         } else if (flagValue("send", "--key", args, &i)) |v| {
@@ -1138,9 +1256,18 @@ fn cmdSend(alloc: std.mem.Allocator, args: []const [:0]const u8) !void {
         usageFail("send", "cannot send NUL bytes", .{});
     }
 
+    const append_enter = payloadAppendsEnter(payload.items, text != null, no_enter, keys_arg);
+    try enforcePendingInputGateCli(alloc, dir, name, append_enter, force);
+
     const result = try mustControl(alloc, dir, name, &.{ "send", payload.items });
     defer alloc.free(result.text);
     if (!result.ok) fail(exit_runtime, "{s}", .{result.text});
+
+    pending_input.updateLedger(alloc, dir, name, .{
+        .text_without_enter = text != null and no_enter,
+        .sent_text = text,
+        .sent_enter = append_enter,
+    });
 }
 
 fn slashUsageMessage(err: slash.ComposeError, command: slash.Command) []const u8 {
@@ -1170,6 +1297,7 @@ fn cmdSlash(alloc: std.mem.Allocator, args: []const [:0]const u8) !void {
     var command_arg: ?[]const u8 = null;
     var prompt: ?[]const u8 = null;
     var clear = false;
+    var force = false;
     var ws_flag: ?[]const u8 = null;
 
     var i: usize = 0;
@@ -1178,6 +1306,8 @@ fn cmdSlash(alloc: std.mem.Allocator, args: []const [:0]const u8) !void {
         if (isHelpFlag(arg)) return printHelpPage("slash");
         if (std.mem.eql(u8, arg, "--clear")) {
             clear = true;
+        } else if (std.mem.eql(u8, arg, "--force")) {
+            force = true;
         } else if (flagValue("slash", "--prompt", args, &i)) |v| {
             prompt = v;
         } else if (flagValue("slash", "--workspace", args, &i)) |v| {
@@ -1218,9 +1348,13 @@ fn cmdSlash(alloc: std.mem.Allocator, args: []const [:0]const u8) !void {
     };
     defer alloc.free(payload);
 
+    try enforcePendingInputGateCli(alloc, dir, name, true, force);
+
     const result = try mustControl(alloc, dir, name, &.{ "send", payload });
     defer alloc.free(result.text);
     if (!result.ok) fail(exit_runtime, "{s}", .{result.text});
+
+    pending_input.updateLedger(alloc, dir, name, .{ .sent_enter = true });
 }
 
 /// Append the byte sequence for a named key. Returns false when the
@@ -1275,33 +1409,8 @@ fn readAllStdin(alloc: std.mem.Allocator) ![]u8 {
     return list.toOwnedSlice(alloc);
 }
 
-const Peek = struct {
-    rows: u32,
-    cols: u32,
-    cursor_row: u32,
-    cursor_col: u32,
-    title: []const u8,
-    screen: []const u8,
-};
-
-/// Wire format: rows \t cols \t cur_row \t cur_col \t title on the
-/// first line, then the screen dump.
-fn parsePeek(payload: []const u8) ?Peek {
-    const nl = std.mem.indexOfScalar(u8, payload, '\n') orelse return null;
-    var rest = payload[0..nl];
-    const rows = cutTab(&rest) orelse return null;
-    const cols = cutTab(&rest) orelse return null;
-    const cur_row = cutTab(&rest) orelse return null;
-    const cur_col = cutTab(&rest) orelse return null;
-    return .{
-        .rows = std.fmt.parseInt(u32, rows, 10) catch return null,
-        .cols = std.fmt.parseInt(u32, cols, 10) catch return null,
-        .cursor_row = std.fmt.parseInt(u32, cur_row, 10) catch return null,
-        .cursor_col = std.fmt.parseInt(u32, cur_col, 10) catch return null,
-        .title = rest,
-        .screen = payload[nl + 1 ..],
-    };
-}
+const Peek = pending_input.Peek;
+const parsePeek = pending_input.parsePeek;
 
 fn cmdPeek(alloc: std.mem.Allocator, args: []const [:0]const u8) !void {
     var scrollback = false;
@@ -3175,6 +3284,7 @@ fn handleInput(
     }
     const has_text = jsonString(parsed.value, "text") != null;
     const should_enter = jsonBool(parsed.value, "enter") orelse has_text;
+    const force = jsonBool(parsed.value, "force") orelse false;
     if (should_enter) try payload.append(alloc, '\r');
     if (payload.items.len == 0) return sendError(stream, 400, "empty_input", "nothing to send");
     if (std.mem.indexOfScalar(u8, payload.items, 0) != null) {
@@ -3185,9 +3295,18 @@ fn handleInput(
     defer alloc.free(dir);
     const name = resolveSessionResult(alloc, dir, want) catch |err| return sendResolveError(stream, err);
     defer alloc.free(name);
+
+    try enforcePendingInputGateHttp(alloc, stream, dir, name, should_enter, force);
+
     const result = try controlSession(alloc, dir, name, &.{ "send", payload.items });
     defer alloc.free(result.text);
     if (!result.ok) return sendError(stream, 500, "input_failed", result.text);
+
+    pending_input.updateLedger(alloc, dir, name, .{
+        .text_without_enter = has_text and !should_enter,
+        .sent_text = jsonString(parsed.value, "text"),
+        .sent_enter = should_enter,
+    });
     return sendJson(stream, 200, "{\"sent\":true}\n");
 }
 
@@ -3209,6 +3328,7 @@ fn handleSlash(
         return sendError(stream, 400, "bad_command", "unknown command");
     const prompt = jsonString(parsed.value, "prompt");
     const clear = jsonBool(parsed.value, "clear") orelse false;
+    const force = jsonBool(parsed.value, "force") orelse false;
 
     const line = slash.compose(alloc, command, .{ .prompt = prompt, .clear = clear }) catch |err| switch (err) {
         error.OutOfMemory => return err,
@@ -3226,9 +3346,13 @@ fn handleSlash(
     };
     defer alloc.free(payload);
 
+    try enforcePendingInputGateHttp(alloc, stream, dir, name, true, force);
+
     const result = try controlSession(alloc, dir, name, &.{ "send", payload });
     defer alloc.free(result.text);
     if (!result.ok) return sendError(stream, 500, "slash_failed", result.text);
+
+    pending_input.updateLedger(alloc, dir, name, .{ .sent_enter = true });
 
     var out: std.ArrayList(u8) = .empty;
     defer out.deinit(alloc);

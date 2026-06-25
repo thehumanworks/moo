@@ -1,0 +1,5 @@
+──────────────────────────────────────────────────────────────────────────────────────────────
+❯ draft probe for pending detection
+──────────────────────────────────────────────────────────────────────────────────────────────
+  🍎 Claude (Opus 4.8 (1M context)) /Users/mish/projects/moo/ [main]                      /rc
+  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents
