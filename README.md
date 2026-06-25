@@ -62,6 +62,7 @@ moo serve                  # expose the localhost REST API
 moo mcp                    # run the bundled stdio MCP server
 moo kill work              # end a session
 moo kill --all             # end every session
+moo ws delete --all        # end sessions and remove every workspace
 ```
 
 With no name, `moo new` names the session after the current directory,
@@ -176,6 +177,7 @@ moo ls -w proj                   # list only "proj" sessions
 moo new api -d -- bash           # a separate "api" in the default workspace
 moo ws                           # all workspaces, with live session counts
 moo kill --all -w proj           # end only "proj"; the default is untouched
+moo ws delete --all              # end sessions and remove every workspace
 ```
 
 Every session command takes `-w/--workspace` (`new`, `attach`, `ui`, `ls`,
@@ -194,6 +196,10 @@ the default (unnamed) workspace.
   is automatically confined to the same workspace. A coding agent driving
   moo from inside `proj` therefore cannot enumerate or kill sessions in
   other projects. A default (unnamed) session leaves `MOO_WORKSPACE` unset.
+- **Workspace lifecycle**: `moo ws ls` lists workspace directories and live
+  session counts; `moo ws delete <workspace>` terminates that workspace's
+  sessions and removes its state. `moo ws delete --all` does the same for every
+  workspace, including the default workspace's sessions.
 
 See `moo help workspaces` for the full page.
 

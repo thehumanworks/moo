@@ -13,6 +13,10 @@ const workspaceSchema = z.object({
   workspace: z.string().default("@default").describe("Workspace id, or @default for the default workspace"),
 });
 
+const requiredWorkspaceSchema = z.object({
+  workspace: z.string().describe("Workspace id, or @default for the default workspace"),
+});
+
 const sessionSchema = workspaceSchema.extend({
   session: z.string().describe("Session name or unique prefix"),
 });
@@ -36,6 +40,33 @@ export function registerMooTools(server: McpServer, client: MooApiClient): void 
       inputSchema: z.object({}),
     },
     async () => result(await client.request("GET", "/v1/workspaces")),
+  );
+
+  server.registerTool(
+    "moo_create_workspace",
+    {
+      title: "Create Moo Workspace",
+      description: "Create a moo workspace without creating a session.",
+      inputSchema: requiredWorkspaceSchema,
+    },
+    async ({ workspace }) => result(await client.request("POST", workspacePath(workspace))),
+  );
+
+  server.registerTool(
+    "moo_delete_workspace",
+    {
+      title: "Delete Moo Workspace",
+      description: "Terminate sessions and delete one moo workspace, or all workspaces.",
+      inputSchema: z.object({
+        workspace: z.string().optional().describe("Workspace id, or @default for the default workspace. Required unless all is true."),
+        all: z.boolean().default(false).describe("Delete every workspace and terminate every session."),
+      }),
+    },
+    async ({ workspace, all }) => {
+      if (all) return result(await client.request("DELETE", "/v1/workspaces?all=true"));
+      if (!workspace) throw new Error("workspace is required unless all is true");
+      return result(await client.request("DELETE", workspacePath(workspace)));
+    },
   );
 
   server.registerTool(

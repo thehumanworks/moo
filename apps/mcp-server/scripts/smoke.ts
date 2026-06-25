@@ -39,7 +39,15 @@ try {
   send(2, "tools/list", {});
   const listed = await expectResult(reader, 2) as { tools?: Array<{ name: string }> };
   const names = new Set((listed.tools ?? []).map((tool) => tool.name));
-  for (const required of ["moo_api_health", "moo_create_session", "moo_send_input", "moo_poll_events"]) {
+  for (const required of [
+    "moo_api_health",
+    "moo_list_workspaces",
+    "moo_create_workspace",
+    "moo_delete_workspace",
+    "moo_create_session",
+    "moo_send_input",
+    "moo_poll_events",
+  ]) {
     if (!names.has(required)) throw new Error(`missing tool: ${required}`);
   }
 

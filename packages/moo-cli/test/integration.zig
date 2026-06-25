@@ -1794,6 +1794,35 @@ test "http api: serve lifecycle" {
     try expectBodyContains(workspaces, "\"workspace\":\"\"");
 }
 
+test "http api: create and delete workspace without creating a session" {
+    const alloc = std.testing.allocator;
+    var h = try Harness.init(alloc);
+    defer h.deinit();
+    var api = try ApiServer.start(&h, null);
+    defer api.deinit();
+
+    const created = try api.request("POST", "/v1/workspaces/empty", "", null);
+    defer created.deinit(alloc);
+    try expectStatus(created, 201);
+    try expectBodyContains(created, "\"workspace\":\"empty\"");
+
+    const listed = try api.request("GET", "/v1/workspaces", "", null);
+    defer listed.deinit(alloc);
+    try expectStatus(listed, 200);
+    try expectBodyContains(listed, "\"workspace\":\"empty\"");
+    try expectBodyContains(listed, "\"sessions\":0");
+
+    const deleted = try api.request("DELETE", "/v1/workspaces/empty", "", null);
+    defer deleted.deinit(alloc);
+    try expectStatus(deleted, 200);
+    try expectBodyContains(deleted, "\"workspace\":\"empty\"");
+    try expectBodyContains(deleted, "\"sessions\":0");
+
+    const missing = try api.request("DELETE", "/v1/workspaces/empty", "", null);
+    defer missing.deinit(alloc);
+    try expectStatus(missing, 404);
+}
+
 test "http api: workspace session management" {
     const alloc = std.testing.allocator;
     var h = try Harness.init(alloc);
@@ -1835,6 +1864,7 @@ test "http api: workspace session management" {
     defer inspected.deinit(alloc);
     try expectStatus(inspected, 200);
     try expectBodyContains(inspected, "\"name\":\"api2\"");
+    try expectBodyContains(inspected, "\"cursor\":");
 
     const deleted = try api.request("DELETE", "/v1/workspaces/proj/sessions/api2", "", null);
     defer deleted.deinit(alloc);
@@ -1843,6 +1873,82 @@ test "http api: workspace session management" {
     const missing = try api.request("GET", "/v1/workspaces/proj/sessions/api2", "", null);
     defer missing.deinit(alloc);
     try expectStatus(missing, 404);
+}
+
+test "http api: delete all workspaces terminates sessions" {
+    const alloc = std.testing.allocator;
+    var h = try Harness.init(alloc);
+    defer h.deinit();
+    var api = try ApiServer.start(&h, null);
+    defer api.deinit();
+
+    const base = try api.request(
+        "POST",
+        "/v1/workspaces/@default/sessions",
+        "{\"name\":\"base\",\"command\":[\"cat\"]}",
+        null,
+    );
+    defer base.deinit(alloc);
+    try expectStatus(base, 201);
+    const proj = try api.request(
+        "POST",
+        "/v1/workspaces/proj/sessions",
+        "{\"name\":\"api\",\"command\":[\"cat\"]}",
+        null,
+    );
+    defer proj.deinit(alloc);
+    try expectStatus(proj, 201);
+
+    const deleted = try api.request("DELETE", "/v1/workspaces?all=true", "", null);
+    defer deleted.deinit(alloc);
+    try expectStatus(deleted, 200);
+    try expectBodyContains(deleted, "\"workspace\":\"\"");
+    try expectBodyContains(deleted, "\"workspace\":\"proj\"");
+
+    const default_sessions = try api.request("GET", "/v1/workspaces/@default/sessions", "", null);
+    defer default_sessions.deinit(alloc);
+    try expectStatus(default_sessions, 200);
+    try std.testing.expect(std.mem.indexOf(u8, default_sessions.body, "\"name\":\"base\"") == null);
+
+    const workspaces = try api.request("GET", "/v1/workspaces", "", null);
+    defer workspaces.deinit(alloc);
+    try expectStatus(workspaces, 200);
+    try std.testing.expect(std.mem.indexOf(u8, workspaces.body, "\"workspace\":\"proj\"") == null);
+}
+
+test "http api: get session tolerates legacy daemon without state" {
+    const alloc = std.testing.allocator;
+    var h = try Harness.init(alloc);
+    defer h.deinit();
+
+    const old_sock = try std.fs.path.join(alloc, &.{ h.dir, "old.sock" });
+    defer alloc.free(old_sock);
+    const old_pid = try startFakeSessionDaemon(old_sock, .no_state);
+    defer cleanupFakeDaemon(old_pid);
+
+    var api = try ApiServer.start(&h, null);
+    defer api.deinit();
+
+    const old = try api.request("GET", "/v1/workspaces/@default/sessions/old", "", null);
+    defer old.deinit(alloc);
+    try expectStatus(old, 200);
+    try expectBodyContains(old, "\"name\":\"old\"");
+    try expectBodyContains(old, "\"title\":\"legacy\"");
+    {
+        var parsed = try std.json.parseFromSlice(std.json.Value, alloc, old.body, .{});
+        defer parsed.deinit();
+        try std.testing.expect(parsed.value.object.get("cursor") == null);
+    }
+
+    const bad_sock = try std.fs.path.join(alloc, &.{ h.dir, "badinfo.sock" });
+    defer alloc.free(bad_sock);
+    const bad_pid = try startFakeSessionDaemon(bad_sock, .malformed_info);
+    defer cleanupFakeDaemon(bad_pid);
+
+    const bad = try api.request("GET", "/v1/workspaces/@default/sessions/badinfo", "", null);
+    defer bad.deinit(alloc);
+    try expectStatus(bad, 500);
+    try expectBodyContains(bad, "\"code\":\"internal_error\"");
 }
 
 test "http api: drive wait screen" {
@@ -2167,8 +2273,12 @@ fn makeDeadUiManagerSocket(path: []const u8) !void {
 const FakeUiManagerMode = enum { eof, malformed, silent };
 
 fn writeOutputFrame(fd: posix.fd_t, payload: []const u8) !void {
+    return writeFrame(fd, 64, payload); // protocol.MsgType.output
+}
+
+fn writeFrame(fd: posix.fd_t, msg_type: u8, payload: []const u8) !void {
     var header: [5]u8 = undefined;
-    header[0] = 64; // protocol.MsgType.output
+    header[0] = msg_type;
     std.mem.writeInt(u32, header[1..5], @intCast(payload.len), .little);
     try writeAllFd(fd, &header);
     try writeAllFd(fd, payload);
@@ -2185,6 +2295,73 @@ fn appendFrame(alloc: std.mem.Allocator, frame: *std.ArrayList(u8), msg_type: u8
 fn writeAllFd(fd: posix.fd_t, bytes: []const u8) !void {
     var i: usize = 0;
     while (i < bytes.len) i += try posix.write(fd, bytes[i..]);
+}
+
+fn readExactFd(fd: posix.fd_t, bytes: []u8) !void {
+    var i: usize = 0;
+    while (i < bytes.len) {
+        const n = try posix.read(fd, bytes[i..]);
+        if (n == 0) return error.ConnectionLost;
+        i += n;
+    }
+}
+
+fn readCommandPayload(fd: posix.fd_t, buf: []u8) ![]const u8 {
+    var header: [5]u8 = undefined;
+    try readExactFd(fd, &header);
+    if (header[0] != 5) return error.BadCommand; // protocol.MsgType.command
+    const len = std.mem.readInt(u32, header[1..5], .little);
+    if (len > buf.len) return error.PayloadTooLarge;
+    try readExactFd(fd, buf[0..len]);
+    return buf[0..len];
+}
+
+const FakeSessionDaemonMode = enum { no_state, malformed_info };
+
+fn startFakeSessionDaemon(path: []const u8, mode: FakeSessionDaemonMode) !std.c.pid_t {
+    const listen_fd = try unixListen(path);
+    errdefer posix.close(listen_fd);
+    const pid = try posix.fork();
+    if (pid == 0) {
+        runFakeSessionDaemon(listen_fd, mode) catch posix.exit(1);
+        posix.exit(0);
+    }
+    posix.close(listen_fd);
+    return pid;
+}
+
+fn runFakeSessionDaemon(listen_fd: posix.fd_t, mode: FakeSessionDaemonMode) !void {
+    defer posix.close(listen_fd);
+    switch (mode) {
+        .no_state => {
+            try serveFakeSessionControl(listen_fd, "info", 67, "old\tDetached\t10\t20\tlegacy"); // ok
+            try serveFakeSessionControl(listen_fd, "state", 68, "unknown command"); // err
+        },
+        .malformed_info => {
+            try serveFakeSessionControl(listen_fd, "info", 67, "malformed");
+        },
+    }
+}
+
+fn serveFakeSessionControl(
+    listen_fd: posix.fd_t,
+    want_command: []const u8,
+    msg_type: u8,
+    payload: []const u8,
+) !void {
+    const fd = try posix.accept(listen_fd, null, null, posix.SOCK.CLOEXEC);
+    defer posix.close(fd);
+    var cmd_buf: [128]u8 = undefined;
+    const command = try readCommandPayload(fd, &cmd_buf);
+    if (!std.mem.eql(u8, command, want_command)) {
+        return writeFrame(fd, 68, "unexpected command"); // protocol.MsgType.err
+    }
+    try writeFrame(fd, msg_type, payload);
+}
+
+fn cleanupFakeDaemon(pid: std.c.pid_t) void {
+    posix.kill(pid, posix.SIG.KILL) catch {};
+    waitPid(pid);
 }
 
 fn startFakeUiManager(path: []const u8, mode: FakeUiManagerMode) !std.c.pid_t {
@@ -2496,6 +2673,46 @@ test "ws --json reports the default and every workspace with a session count" {
     try std.testing.expectEqual(@as(?i64, 1), try wsCount(&h, "beta"));
 }
 
+test "ws delete removes a named workspace without touching default" {
+    const alloc = std.testing.allocator;
+    var h = try Harness.init(alloc);
+    defer h.deinit();
+
+    try h.startDetached("base", &.{"cat"});
+    try startDetachedWs(&h, "alpha", "a1", &.{"cat"});
+
+    try h.runOk(&.{ "ws", "delete", "alpha" });
+
+    var deadline = Deadline.init(default_timeout_ms);
+    while (true) {
+        if ((try wsCount(&h, "alpha")) == null) break;
+        try deadline.tick("workspace alpha survived ws delete");
+    }
+    try std.testing.expectEqual(@as(?i64, 1), try wsCount(&h, ""));
+    try std.testing.expect(try lsHasSession(&h, &.{}, "base"));
+}
+
+test "ws delete --all terminates sessions and removes named workspaces" {
+    const alloc = std.testing.allocator;
+    var h = try Harness.init(alloc);
+    defer h.deinit();
+
+    try h.startDetached("base", &.{"cat"});
+    try startDetachedWs(&h, "alpha", "a1", &.{"cat"});
+    try startDetachedWs(&h, "beta", "b1", &.{"cat"});
+
+    try h.runOk(&.{ "ws", "delete", "--all" });
+
+    var deadline = Deadline.init(default_timeout_ms);
+    while (true) {
+        const default_count = try wsCount(&h, "");
+        const alpha_count = try wsCount(&h, "alpha");
+        const beta_count = try wsCount(&h, "beta");
+        if (default_count != null and default_count.? == 0 and alpha_count == null and beta_count == null) break;
+        try deadline.tick("workspaces survived ws delete --all");
+    }
+}
+
 test "ws human output lists workspace names and counts" {
     const alloc = std.testing.allocator;
     var h = try Harness.init(alloc);
@@ -2735,7 +2952,16 @@ fn waitUiSessionCount(h: *Harness, want: usize) !void {
     var deadline = Deadline.init(default_timeout_ms);
     while (true) {
         if (try uiSessionCount(h) == want) return;
-        try deadline.tick("session count never settled");
+        deadline.tick("session count never settled") catch |err| {
+            const result = h.run(&.{ "ls", "--json" }) catch return err;
+            defer h.alloc.free(result.stdout);
+            defer h.alloc.free(result.stderr);
+            std.debug.print(
+                "--- wanted {d} sessions, saw term={any} stdout={s} stderr={s} ---\n",
+                .{ want, result.term, result.stdout, result.stderr },
+            );
+            return err;
+        };
     }
 }
 
@@ -3300,6 +3526,7 @@ test "ui: create and kill sessions from the ui" {
     try ui.send("\x01k");
     try ui.waitFor("? y/n");
     try ui.send("y");
+    try ui.waitFor("session ended");
     try waitUiSessionCount(&h, 2);
 
     // The pre-existing sessions survived.

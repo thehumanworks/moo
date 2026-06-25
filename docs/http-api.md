@@ -47,6 +47,9 @@ Workspace path segments use the existing moo workspace name rules.
 | --- | --- | --- |
 | `GET` | `/v1/health` | Health check |
 | `GET` | `/v1/workspaces` | List workspaces and session counts |
+| `DELETE` | `/v1/workspaces?all=true` | Terminate sessions and delete every workspace |
+| `POST` | `/v1/workspaces/{workspace}` | Create a workspace without creating a session |
+| `DELETE` | `/v1/workspaces/{workspace}` | Terminate sessions and delete one workspace |
 | `GET` | `/v1/workspaces/{workspace}/sessions` | List live sessions in a workspace |
 | `POST` | `/v1/workspaces/{workspace}/sessions` | Create a detached session |
 | `GET` | `/v1/workspaces/{workspace}/sessions/{session}` | Inspect one session |
@@ -60,6 +63,34 @@ Workspace path segments use the existing moo workspace name rules.
 | `GET` | `/v1/workspaces/{workspace}/sessions/{session}/events` | Long-poll session event cursor |
 
 ## Schemas
+
+Create workspace:
+
+```http
+POST /v1/workspaces/proj
+```
+
+Returns `201`:
+
+```json
+{"id":"proj","workspace":"proj","created":true}
+```
+
+Delete workspace:
+
+```http
+DELETE /v1/workspaces/proj
+DELETE /v1/workspaces?all=true
+```
+
+Responses include the number of sessions that were terminated:
+
+```json
+{"workspace":"proj","deleted":true,"sessions":2}
+```
+
+For `?all=true`, the response contains one entry per workspace. Named
+workspace directories are removed; the default runtime directory remains.
 
 Create session:
 
@@ -209,6 +240,8 @@ API=http://127.0.0.1:8765
 
 curl "$API/v1/workspaces"
 
+curl -sS -X POST "$API/v1/workspaces/proj"
+
 curl -sS -X POST "$API/v1/workspaces/proj/sessions" \
   -H 'Content-Type: application/json' \
   -d '{"name":"build","command":["bash"],"rows":24,"cols":80}'
@@ -228,6 +261,10 @@ curl "$API/v1/workspaces/proj/sessions/build/events?since=0&timeout=5s"
 curl "$API/v1/workspaces/proj/sessions/build/transcript"
 
 curl -sS -X DELETE "$API/v1/workspaces/proj/sessions/build"
+
+curl -sS -X DELETE "$API/v1/workspaces/proj"
+
+curl -sS -X DELETE "$API/v1/workspaces?all=true"
 ```
 
 With auth:

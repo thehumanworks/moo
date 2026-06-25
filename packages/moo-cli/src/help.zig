@@ -44,7 +44,7 @@ pub const overview =
     \\    mcp                          run the bundled stdio MCP server
     \\
     \\  Information
-    \\    ws [--json]                  list workspaces and session counts
+    \\    ws [ls|delete]               list or delete workspaces
     \\    version                      print the version
     \\    help [page]                  this overview, or detailed help
     \\
@@ -225,13 +225,23 @@ pub const commands = [_]Entry{
     .{
         .name = "ws",
         .body =
-        \\usage: moo ws [--json]
+        \\usage: moo ws [ls] [--json]
+        \\       moo ws delete <workspace|@default>
+        \\       moo ws delete --all
         \\
-        \\List every workspace and how many live sessions each holds. The
-        \\default workspace (sessions created without -w) is listed first
-        \\as "(default)", followed by every named workspace in name order.
-        \\Each existing workspace appears even when its count is 0, so a
-        \\workspace you created but later emptied is still visible.
+        \\List or delete workspaces. With no subcommand, 'moo ws' behaves
+        \\like 'moo ws ls': it lists every workspace and how many live
+        \\sessions each holds. The default workspace (sessions created
+        \\without -w) is listed first as "(default)", followed by every
+        \\named workspace in name order. Each existing workspace appears
+        \\even when its count is 0, so a workspace you created but later
+        \\emptied is still visible.
+        \\
+        \\'moo ws delete <workspace>' terminates that workspace's sessions,
+        \\stops its UI manager state, and removes the named workspace
+        \\directory. Use '@default' to target the default workspace; the
+        \\default runtime directory itself is left in place. 'moo ws delete
+        \\--all' performs the same cleanup for every workspace.
         \\
         \\Unlike the session commands, 'ws' is global: it does not take a
         \\-w/--workspace flag and is unaffected by $MOO_WORKSPACE.
@@ -245,7 +255,9 @@ pub const commands = [_]Entry{
         \\
         \\examples:
         \\  moo ws                       a WORKSPACE / SESSIONS table
-        \\  moo ws --json | jq .         per-workspace counts, for scripts
+        \\  moo ws ls --json | jq .      per-workspace counts, for scripts
+        \\  moo ws delete proj           delete one workspace
+        \\  moo ws delete --all          terminate and delete all workspaces
         \\
         ,
     },
@@ -640,9 +652,11 @@ pub const topics = [_]Entry{
         \\  letters, digits, '.', '_', '-', no leading '.' or '-'. An
         \\  invalid name is a usage error (exit 2).
         \\
-        \\listing them:
-        \\  moo ws            a WORKSPACE / SESSIONS table, default first
-        \\  moo ws --json     [{"workspace","sessions"}]; default is ""
+        \\listing and deleting them:
+        \\  moo ws               a WORKSPACE / SESSIONS table, default first
+        \\  moo ws ls --json     [{"workspace","sessions"}]; default is ""
+        \\  moo ws delete proj   terminate sessions and remove proj
+        \\  moo ws delete --all  terminate and delete every workspace
         \\
         \\on disk:
         \\  The socket directory ($MOO_DIR, else $XDG_RUNTIME_DIR/moo, else
@@ -668,6 +682,7 @@ pub const topics = [_]Entry{
         \\  moo new api -d -- bash           # a separate "api" in default
         \\  moo ws                           # see both, with counts
         \\  moo kill --all -w proj           # end only "proj"
+        \\  moo ws delete --all              # end and remove all workspaces
         \\
         ,
     },
