@@ -93,6 +93,8 @@ pub const SpawnOptions = struct {
     argv: []const []const u8,
     env: *std.process.EnvMap,
     size: Winsize,
+    /// Working directory for the child process. Default: inherit from parent.
+    cwd: ?[]const u8 = null,
 };
 
 pub const Spawned = struct {
@@ -130,6 +132,8 @@ pub fn spawnInPty(alloc: std.mem.Allocator, opts: SpawnOptions) !Spawned {
         posix.dup2(pty.slave, 2) catch posix.exit(127);
         if (pty.slave > 2) posix.close(pty.slave);
         posix.close(pty.master);
+
+        if (opts.cwd) |cwd| posix.chdir(cwd) catch posix.exit(127);
 
         const err = posix.execvpeZ(argv0, argv, envp);
         _ = err catch {};

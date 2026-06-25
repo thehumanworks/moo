@@ -68,12 +68,28 @@ Create workspace:
 
 ```http
 POST /v1/workspaces/proj
+Content-Type: application/json
+
+{"cwd":"/path/to/project"}
 ```
+
+`cwd` is optional. When set it must name an existing directory; moo stores the
+absolute path in `.workspace.json` inside the workspace directory. Every session
+created in that workspace starts with that working directory.
 
 Returns `201`:
 
 ```json
-{"id":"proj","workspace":"proj","created":true}
+{"id":"proj","workspace":"proj","created":true,"cwd":"/path/to/project"}
+```
+
+When no cwd is configured the `cwd` field is omitted from create and list
+responses.
+
+List workspaces (`GET /v1/workspaces`) returns cwd when configured:
+
+```json
+{"workspaces":[{"id":"@default","workspace":"","sessions":1},{"id":"proj","workspace":"proj","sessions":0,"cwd":"/path/to/project"}]}
 ```
 
 Remove workspace:

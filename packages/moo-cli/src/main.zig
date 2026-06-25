@@ -428,9 +428,8 @@ fn startSessionNamed(
     // existing session's sidecar or transcript store.
     const listen_fd = try bindListen(alloc, sock);
 
-    var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const cwd = posix.getcwd(&cwd_buf) catch ".";
-    writeSessionMeta(alloc, dir, name, cwd);
+    const session_cwd = try paths.resolveSessionCwd(alloc, dir);
+    writeSessionMeta(alloc, dir, name, session_cwd);
 
     // An agent harness augments the launch command (pinning a session id),
     // supplies per-session env (e.g. CODEX_HOME), and records a sidecar so the
@@ -439,7 +438,7 @@ fn startSessionNamed(
     var argv = cmd_argv;
     var env_overrides: []const [2][]const u8 = &.{};
     if (agent) |ag| {
-        const launch = prepareAgent(alloc, dir, name, ag, cmd_argv, cwd);
+        const launch = prepareAgent(alloc, dir, name, ag, cmd_argv, session_cwd);
         argv = launch.argv;
         env_overrides = launch.env;
     }
@@ -465,15 +464,17 @@ fn startSessionNamed(
             .listen_fd = listen_fd,
             .argv = argv,
             .env_overrides = env_overrides,
+            .cwd = session_cwd,
             .rows = rows,
             .cols = cols,
         });
+        alloc.free(session_cwd);
         return;
     }
     const pid = try posix.fork();
     if (pid == 0) {
         if (session_child_close_fd >= 0) posix.close(session_child_close_fd);
-        runDaemon(alloc, name, sock, listen_fd, argv, env_overrides, rows, cols);
+        runDaemon(alloc, name, sock, listen_fd, argv, env_overrides, session_cwd, rows, cols);
     }
     posix.close(listen_fd);
 }
@@ -737,12 +738,14 @@ fn cmdLs(alloc: std.mem.Allocator, args: []const [:0]const u8) !void {
 const WorkspaceEntry = struct {
     name: []u8,
     dir: []u8,
+    cwd: ?[]u8 = null,
 };
 
 fn freeWorkspaceEntries(alloc: std.mem.Allocator, entries: []WorkspaceEntry) void {
     for (entries) |entry| {
         alloc.free(entry.name);
         alloc.free(entry.dir);
+        if (entry.cwd) |cwd| alloc.free(cwd);
     }
     alloc.free(entries);
 }
@@ -762,6 +765,7 @@ fn collectWorkspaces(alloc: std.mem.Allocator) ![]WorkspaceEntry {
     try entries.append(alloc, .{
         .name = try alloc.dupe(u8, ""),
         .dir = base,
+        .cwd = workspaceEntryCwd(alloc, base) catch null,
     });
 
     const ws_root = try std.fs.path.join(alloc, &.{ base, "ws" });
@@ -777,7 +781,11 @@ fn collectWorkspaces(alloc: std.mem.Allocator) ![]WorkspaceEntry {
             errdefer alloc.free(name);
             const ws_dir = try std.fs.path.join(alloc, &.{ ws_root, entry.name });
             errdefer alloc.free(ws_dir);
-            try entries.append(alloc, .{ .name = name, .dir = ws_dir });
+            try entries.append(alloc, .{
+                .name = name,
+                .dir = ws_dir,
+                .cwd = workspaceEntryCwd(alloc, ws_dir) catch null,
+            });
         }
     } else |err| switch (err) {
         error.FileNotFound => {},
@@ -819,10 +827,18 @@ fn countSessions(alloc: std.mem.Allocator, dir: []const u8) !usize {
     return sessions.len;
 }
 
+fn workspaceEntryCwd(alloc: std.mem.Allocator, dir: []const u8) !?[]u8 {
+    var config = try paths.readWorkspaceConfig(alloc, dir);
+    defer config.deinit(alloc);
+    if (config.cwd) |cwd| return try alloc.dupe(u8, cwd);
+    return null;
+}
+
 fn cmdWorkspace(alloc: std.mem.Allocator, args: []const [:0]const u8) !void {
     if (args.len == 0 or std.mem.eql(u8, args[0], "--json")) return cmdWorkspaceList(alloc, args);
     if (isHelpFlag(args[0])) return printHelpPage("workspace");
     if (std.mem.eql(u8, args[0], "list") or std.mem.eql(u8, args[0], "ls")) return cmdWorkspaceList(alloc, args[1..]);
+    if (std.mem.eql(u8, args[0], "create")) return cmdWorkspaceCreate(alloc, args[1..]);
     if (std.mem.eql(u8, args[0], "remove") or std.mem.eql(u8, args[0], "rm")) return cmdWorkspaceRemove(alloc, args[1..]);
     usageFail("workspace", "unknown workspace subcommand '{s}'", .{args[0]});
 }
@@ -850,7 +866,7 @@ fn cmdWorkspaceList(alloc: std.mem.Allocator, args: []const [:0]const u8) !void 
         try out.append(alloc, '[');
         for (entries, 0..) |entry, idx| {
             if (idx > 0) try out.append(alloc, ',');
-            try appendWsJson(alloc, &out, entry.name, try countSessions(alloc, entry.dir));
+            try appendWsJson(alloc, &out, entry.name, try countSessions(alloc, entry.dir), entry.cwd);
         }
         try out.appendSlice(alloc, "]\n");
         return stdoutWrite(out.items);
@@ -866,6 +882,42 @@ fn cmdWorkspaceList(alloc: std.mem.Allocator, args: []const [:0]const u8) !void 
         try appendWsRow(alloc, &out, label, try countSessions(alloc, entry.dir), name_width);
     }
     try stdoutWrite(out.items);
+}
+
+fn cmdWorkspaceCreate(alloc: std.mem.Allocator, args: []const [:0]const u8) !void {
+    var name_arg: ?[]const u8 = null;
+    var cwd_arg: ?[]const u8 = null;
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        const arg = args[i];
+        if (isHelpFlag(arg)) return printHelpPage("workspace");
+        if (flagValue("workspace", "--cwd", args, &i)) |v| {
+            cwd_arg = v;
+        } else if (arg.len > 0 and arg[0] == '-') {
+            usageFail("workspace", "unknown flag '{s}'", .{arg});
+        } else if (name_arg == null) {
+            name_arg = arg;
+        } else {
+            usageFail("workspace", "unexpected argument '{s}'", .{arg});
+        }
+    }
+    const raw = name_arg orelse usageFail("workspace", "a workspace name is required", .{});
+    try paths.validateName(raw);
+
+    const dir = try paths.socketDirFor(alloc, raw);
+    defer alloc.free(dir);
+
+    var cwd: ?[]u8 = null;
+    if (cwd_arg) |cwd_raw| {
+        paths.writeWorkspaceConfig(alloc, dir, cwd_raw) catch |err| switch (err) {
+            error.InvalidWorkspaceCwd => usageFail("workspace", "cwd must be an existing directory", .{}),
+            else => return err,
+        };
+        cwd = paths.validateWorkspaceCwd(alloc, cwd_raw) catch unreachable;
+    }
+    defer if (cwd) |c| alloc.free(c);
+
+    try stdoutPrint(alloc, "{s}\n", .{raw});
 }
 
 fn cmdWorkspaceRemove(alloc: std.mem.Allocator, args: []const [:0]const u8) !void {
@@ -981,12 +1033,22 @@ fn destroyUiManager(alloc: std.mem.Allocator, dir: []const u8) void {
     std.fs.cwd().deleteFile(id_path) catch {};
 }
 
-fn appendWsJson(alloc: std.mem.Allocator, out: *std.ArrayList(u8), name: []const u8, count: usize) !void {
+fn appendWsJson(
+    alloc: std.mem.Allocator,
+    out: *std.ArrayList(u8),
+    name: []const u8,
+    count: usize,
+    cwd: ?[]const u8,
+) !void {
     try out.appendSlice(alloc, "{\"workspace\":");
     try appendJsonString(alloc, out, name);
-    const tail = try std.fmt.allocPrint(alloc, ",\"sessions\":{d}}}", .{count});
-    defer alloc.free(tail);
-    try out.appendSlice(alloc, tail);
+    try out.appendSlice(alloc, ",\"sessions\":");
+    try out.print(alloc, "{d}", .{count});
+    if (cwd) |c| {
+        try out.appendSlice(alloc, ",\"cwd\":");
+        try appendJsonString(alloc, out, c);
+    }
+    try out.appendSlice(alloc, "}");
 }
 
 fn appendWsRow(alloc: std.mem.Allocator, out: *std.ArrayList(u8), name: []const u8, count: usize, width: usize) !void {
@@ -2534,7 +2596,7 @@ fn dispatchHttp(
     if (segs.len == 3 and std.mem.eql(u8, segs[0], "v1") and std.mem.eql(u8, segs[1], "workspaces")) {
         const workspace = workspaceFromSegment(segs[2]) catch
             return sendError(stream, 400, "bad_workspace", "invalid workspace segment");
-        if (std.mem.eql(u8, req.method, "POST")) return handleCreateWorkspace(alloc, stream, workspace);
+        if (std.mem.eql(u8, req.method, "POST")) return handleCreateWorkspace(alloc, stream, workspace, req.body);
         if (std.mem.eql(u8, req.method, "DELETE")) return handleRemoveWorkspace(alloc, stream, workspace);
     }
     if (segs.len >= 4 and std.mem.eql(u8, segs[0], "v1") and std.mem.eql(u8, segs[1], "workspaces") and
@@ -2628,22 +2690,50 @@ fn handleWorkspaces(alloc: std.mem.Allocator, stream: std.net.Stream) !void {
             if (entry.name.len == 0) "@default" else entry.name,
             entry.name,
             try countSessions(alloc, entry.dir),
+            entry.cwd,
         );
     }
     try out.appendSlice(alloc, "]}\n");
     return sendOwnedJson(alloc, stream, 200, &out);
 }
 
-fn handleCreateWorkspace(alloc: std.mem.Allocator, stream: std.net.Stream, workspace: ?[]const u8) !void {
+fn handleCreateWorkspace(
+    alloc: std.mem.Allocator,
+    stream: std.net.Stream,
+    workspace: ?[]const u8,
+    body: []const u8,
+) !void {
     const dir = try workspaceDirHttp(alloc, workspace);
     defer alloc.free(dir);
+
+    var cwd: ?[]u8 = null;
+    if (body.len > 0) {
+        var parsed = std.json.parseFromSlice(std.json.Value, alloc, body, .{}) catch
+            return sendError(stream, 400, "bad_json", "request body must be a JSON object");
+        defer parsed.deinit();
+        if (parsed.value != .object) return sendError(stream, 400, "bad_json", "request body must be a JSON object");
+        if (jsonString(parsed.value, "cwd")) |cwd_raw| {
+            cwd = paths.validateWorkspaceCwd(alloc, cwd_raw) catch |err| switch (err) {
+                error.InvalidWorkspaceCwd => return sendError(stream, 400, "bad_cwd", "cwd must be an existing directory"),
+                else => return err,
+            };
+            try paths.writeWorkspaceConfig(alloc, dir, cwd.?);
+        }
+    }
+    defer if (cwd) |c| alloc.free(c);
+
     var out: std.ArrayList(u8) = .empty;
     defer out.deinit(alloc);
     try out.appendSlice(alloc, "{\"id\":");
     try appendJsonString(alloc, &out, if (workspace) |ws| ws else "@default");
     try out.appendSlice(alloc, ",\"workspace\":");
     try appendJsonString(alloc, &out, workspace orelse "");
-    try out.appendSlice(alloc, ",\"created\":true}\n");
+    try out.appendSlice(alloc, ",\"created\":true");
+    if (cwd) |c| {
+        try out.appendSlice(alloc, ",\"cwd\":");
+        try appendJsonString(alloc, &out, c);
+    }
+    try out.appendSlice(alloc, "}\n");
     return sendOwnedJson(alloc, stream, 201, &out);
 }
 
@@ -2694,12 +2784,18 @@ fn appendWorkspaceJson(
     id: []const u8,
     name: []const u8,
     sessions: usize,
+    cwd: ?[]const u8,
 ) !void {
     try out.appendSlice(alloc, "{\"id\":");
     try appendJsonString(alloc, out, id);
     try out.appendSlice(alloc, ",\"workspace\":");
     try appendJsonString(alloc, out, name);
-    try out.print(alloc, ",\"sessions\":{d}}}", .{sessions});
+    try out.print(alloc, ",\"sessions\":{d}", .{sessions});
+    if (cwd) |c| {
+        try out.appendSlice(alloc, ",\"cwd\":");
+        try appendJsonString(alloc, out, c);
+    }
+    try out.appendSlice(alloc, "}");
 }
 
 fn handleListSessions(alloc: std.mem.Allocator, stream: std.net.Stream, workspace: ?[]const u8) !void {
@@ -3399,6 +3495,7 @@ fn runDaemon(
     listen_fd: posix.fd_t,
     argv: []const []const u8,
     env_overrides: []const [2][]const u8,
+    cwd: []const u8,
     rows: u16,
     cols: u16,
 ) noreturn {
@@ -3428,6 +3525,7 @@ fn runDaemon(
         .listen_fd = listen_fd,
         .argv = argv,
         .env_overrides = env_overrides,
+        .cwd = cwd,
         .rows = rows,
         .cols = cols,
     }) catch |err| {
