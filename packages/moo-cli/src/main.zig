@@ -2524,25 +2524,6 @@ fn dispatchHttp(
 
     var seg_buf: [8][]const u8 = undefined;
     const segs = splitPath(req.path, &seg_buf);
-    if (segs.len == 2 and eqlSegs(segs, &.{ "v1", "workspace" })) {
-        if (std.mem.eql(u8, req.method, "GET")) return handleWorkspaces(alloc, stream);
-    }
-    if (segs.len == 3 and std.mem.eql(u8, segs[0], "v1") and std.mem.eql(u8, segs[1], "workspace")) {
-        const action = segs[2];
-        if (std.mem.eql(u8, action, "list") and
-            (std.mem.eql(u8, req.method, "GET") or std.mem.eql(u8, req.method, "POST")))
-        {
-            return handleWorkspaces(alloc, stream);
-        }
-        if (std.mem.eql(u8, action, "create") and std.mem.eql(u8, req.method, "POST")) {
-            return handleCreateWorkspaceAction(alloc, stream, req.body);
-        }
-        if ((std.mem.eql(u8, action, "remove") or std.mem.eql(u8, action, "rm")) and
-            std.mem.eql(u8, req.method, "POST"))
-        {
-            return handleRemoveWorkspaceAction(alloc, stream, req.body);
-        }
-    }
     if (segs.len == 2 and eqlSegs(segs, &.{ "v1", "workspaces" })) {
         if (std.mem.eql(u8, req.method, "GET")) return handleWorkspaces(alloc, stream);
         if (std.mem.eql(u8, req.method, "DELETE")) {
@@ -2629,12 +2610,6 @@ fn workspaceFromSegment(segment: []const u8) !?[]const u8 {
     return segment;
 }
 
-fn workspaceFromApiValue(value: []const u8) !?[]const u8 {
-    if (value.len == 0 or std.mem.eql(u8, value, "@default")) return null;
-    try paths.validateName(value);
-    return value;
-}
-
 fn workspaceDirHttp(alloc: std.mem.Allocator, workspace: ?[]const u8) ![]u8 {
     return paths.socketDirFor(alloc, workspace);
 }
@@ -2672,18 +2647,6 @@ fn handleCreateWorkspace(alloc: std.mem.Allocator, stream: std.net.Stream, works
     return sendOwnedJson(alloc, stream, 201, &out);
 }
 
-fn handleCreateWorkspaceAction(alloc: std.mem.Allocator, stream: std.net.Stream, body: []const u8) !void {
-    var parsed = std.json.parseFromSlice(std.json.Value, alloc, body, .{}) catch
-        return sendError(stream, 400, "bad_json", "request body must be a JSON object");
-    defer parsed.deinit();
-    if (parsed.value != .object) return sendError(stream, 400, "bad_json", "request body must be a JSON object");
-    const raw = jsonString(parsed.value, "workspace") orelse
-        return sendError(stream, 400, "bad_request", "workspace is required");
-    const workspace = workspaceFromApiValue(raw) catch
-        return sendError(stream, 400, "bad_workspace", "invalid workspace");
-    return handleCreateWorkspace(alloc, stream, workspace);
-}
-
 fn handleRemoveWorkspace(alloc: std.mem.Allocator, stream: std.net.Stream, workspace: ?[]const u8) !void {
     const dir = workspaceDirExisting(alloc, workspace) catch |err| switch (err) {
         error.NoWorkspace => return sendError(stream, 404, "not_found", "workspace not found"),
@@ -2697,24 +2660,6 @@ fn handleRemoveWorkspace(alloc: std.mem.Allocator, stream: std.net.Stream, works
     try appendWorkspaceRemoveJson(alloc, &out, workspace orelse "", sessions);
     try out.append(alloc, '\n');
     return sendOwnedJson(alloc, stream, 200, &out);
-}
-
-fn handleRemoveWorkspaceAction(alloc: std.mem.Allocator, stream: std.net.Stream, body: []const u8) !void {
-    var parsed = std.json.parseFromSlice(std.json.Value, alloc, body, .{}) catch
-        return sendError(stream, 400, "bad_json", "request body must be a JSON object");
-    defer parsed.deinit();
-    if (parsed.value != .object) return sendError(stream, 400, "bad_json", "request body must be a JSON object");
-    const all = jsonBool(parsed.value, "all") orelse false;
-    const raw = jsonString(parsed.value, "workspace");
-    if (all and raw != null) {
-        return sendError(stream, 400, "bad_request", "all cannot be combined with workspace");
-    }
-    if (all) return handleRemoveAllWorkspaces(alloc, stream);
-    const workspace_raw = raw orelse
-        return sendError(stream, 400, "bad_request", "workspace is required unless all is true");
-    const workspace = workspaceFromApiValue(workspace_raw) catch
-        return sendError(stream, 400, "bad_workspace", "invalid workspace");
-    return handleRemoveWorkspace(alloc, stream, workspace);
 }
 
 fn handleRemoveAllWorkspaces(alloc: std.mem.Allocator, stream: std.net.Stream) !void {

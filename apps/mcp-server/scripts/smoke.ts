@@ -41,16 +41,24 @@ try {
   const names = new Set((listed.tools ?? []).map((tool) => tool.name));
   for (const required of [
     "moo_api_health",
-    "moo_workspace_list",
-    "moo_workspace_ls",
-    "moo_workspace_create",
-    "moo_workspace_remove",
-    "moo_workspace_rm",
+    "moo_list_workspaces",
+    "moo_create_workspace",
+    "moo_remove_workspace",
+    "moo_remove_all_workspaces",
     "moo_create_session",
     "moo_send_input",
     "moo_poll_events",
   ]) {
     if (!names.has(required)) throw new Error(`missing tool: ${required}`);
+  }
+  for (const disallowed of [
+    "moo_workspace_list",
+    "moo_workspace_ls",
+    "moo_workspace_create",
+    "moo_workspace_remove",
+    "moo_workspace_rm",
+  ]) {
+    if (names.has(disallowed)) throw new Error(`unexpected alias tool: ${disallowed}`);
   }
 
   send(3, "tools/call", { name: "moo_api_health", arguments: {} });
@@ -59,28 +67,28 @@ try {
     throw new Error(`unexpected health result: ${JSON.stringify(health)}`);
   }
 
-  send(4, "tools/call", { name: "moo_workspace_create", arguments: { workspace: "smoke" } });
+  send(4, "tools/call", { name: "moo_create_workspace", arguments: { workspace: "smoke" } });
   const created = await expectResult(reader, 4) as { structuredContent?: { workspace?: string } };
   if (created.structuredContent?.workspace !== "smoke") {
     throw new Error(`unexpected create result: ${JSON.stringify(created)}`);
   }
 
-  send(5, "tools/call", { name: "moo_workspace_list", arguments: {} });
+  send(5, "tools/call", { name: "moo_list_workspaces", arguments: {} });
   const workspaces = await expectResult(reader, 5) as { structuredContent?: { workspaces?: Array<{ workspace?: string }> } };
   if (!workspaces.structuredContent?.workspaces?.some((workspace) => workspace.workspace === "smoke")) {
     throw new Error(`workspace missing from list result: ${JSON.stringify(workspaces)}`);
   }
 
-  send(6, "tools/call", { name: "moo_workspace_rm", arguments: { workspace: "smoke" } });
+  send(6, "tools/call", { name: "moo_remove_workspace", arguments: { workspace: "smoke" } });
   const removed = await expectResult(reader, 6) as { structuredContent?: { workspace?: string; removed?: boolean } };
   if (removed.structuredContent?.workspace !== "smoke" || removed.structuredContent.removed !== true) {
-    throw new Error(`unexpected rm result: ${JSON.stringify(removed)}`);
+    throw new Error(`unexpected remove result: ${JSON.stringify(removed)}`);
   }
 
-  send(7, "tools/call", { name: "moo_workspace_remove", arguments: { all: true } });
+  send(7, "tools/call", { name: "moo_remove_all_workspaces", arguments: {} });
   const removedAll = await expectResult(reader, 7) as { structuredContent?: { removed?: boolean } };
   if (removedAll.structuredContent?.removed !== true) {
-    throw new Error(`unexpected remove --all result: ${JSON.stringify(removedAll)}`);
+    throw new Error(`unexpected remove all result: ${JSON.stringify(removedAll)}`);
   }
 
   child.stdin.end();

@@ -79,10 +79,6 @@ export function workspacePath(workspace: string): string {
     : `/v1/workspaces/${encodeURIComponent(workspace)}`;
 }
 
-export function workspaceActionPath(action: "list" | "create" | "remove" | "rm"): string {
-  return `/v1/workspace/${action}`;
-}
-
 export function sessionPath(workspace: string, session: string): string {
   return `${workspacePath(workspace)}/sessions/${encodeURIComponent(session)}`;
 }

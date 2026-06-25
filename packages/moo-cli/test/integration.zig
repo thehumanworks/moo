@@ -1788,7 +1788,7 @@ test "http api: serve lifecycle" {
     try expectStatus(health, 200);
     try expectBodyContains(health, "\"ok\":true");
 
-    const workspaces = try api.request("GET", "/v1/workspace/list", "", null);
+    const workspaces = try api.request("GET", "/v1/workspaces", "", null);
     defer workspaces.deinit(alloc);
     try expectStatus(workspaces, 200);
     try expectBodyContains(workspaces, "\"workspace\":\"\"");
@@ -1801,7 +1801,7 @@ test "http api: create and remove workspace without creating a session" {
     var api = try ApiServer.start(&h, null);
     defer api.deinit();
 
-    const created = try api.request("POST", "/v1/workspace/create", "{\"workspace\":\"empty\"}", null);
+    const created = try api.request("POST", "/v1/workspaces/empty", "", null);
     defer created.deinit(alloc);
     try expectStatus(created, 201);
     try expectBodyContains(created, "\"workspace\":\"empty\"");
@@ -1812,16 +1812,40 @@ test "http api: create and remove workspace without creating a session" {
     try expectBodyContains(listed, "\"workspace\":\"empty\"");
     try expectBodyContains(listed, "\"sessions\":0");
 
-    const removed = try api.request("POST", "/v1/workspace/remove", "{\"workspace\":\"empty\"}", null);
+    const removed = try api.request("DELETE", "/v1/workspaces/empty", "", null);
     defer removed.deinit(alloc);
     try expectStatus(removed, 200);
     try expectBodyContains(removed, "\"workspace\":\"empty\"");
     try expectBodyContains(removed, "\"removed\":true");
     try expectBodyContains(removed, "\"sessions\":0");
 
-    const missing = try api.request("POST", "/v1/workspace/remove", "{\"workspace\":\"empty\"}", null);
+    const missing = try api.request("DELETE", "/v1/workspaces/empty", "", null);
     defer missing.deinit(alloc);
     try expectStatus(missing, 404);
+}
+
+test "http api: workspace command aliases are not exposed" {
+    const alloc = std.testing.allocator;
+    var h = try Harness.init(alloc);
+    defer h.deinit();
+    var api = try ApiServer.start(&h, null);
+    defer api.deinit();
+
+    const list = try api.request("GET", "/v1/workspace/list", "", null);
+    defer list.deinit(alloc);
+    try expectStatus(list, 404);
+
+    const create = try api.request("POST", "/v1/workspace/create", "{\"workspace\":\"empty\"}", null);
+    defer create.deinit(alloc);
+    try expectStatus(create, 404);
+
+    const remove = try api.request("POST", "/v1/workspace/remove", "{\"workspace\":\"empty\"}", null);
+    defer remove.deinit(alloc);
+    try expectStatus(remove, 404);
+
+    const rm = try api.request("POST", "/v1/workspace/rm", "{\"all\":true}", null);
+    defer rm.deinit(alloc);
+    try expectStatus(rm, 404);
 }
 
 test "http api: workspace session management" {
@@ -1900,7 +1924,7 @@ test "http api: remove all workspaces terminates sessions" {
     defer proj.deinit(alloc);
     try expectStatus(proj, 201);
 
-    const removed = try api.request("POST", "/v1/workspace/rm", "{\"all\":true}", null);
+    const removed = try api.request("DELETE", "/v1/workspaces?all=true", "", null);
     defer removed.deinit(alloc);
     try expectStatus(removed, 200);
     try expectBodyContains(removed, "\"removed\":true");
