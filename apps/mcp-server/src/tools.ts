@@ -2,7 +2,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 
 import type { JsonValue, MooApiClient } from "./api.js";
-import { sessionPath, transcriptPath, workspacePath } from "./api.js";
+import { sessionPath, transcriptPath, workspaceActionPath, workspacePath } from "./api.js";
 
 type ToolResult = {
   content: Array<{ type: "text"; text: string }>;
@@ -32,42 +32,21 @@ export function registerMooTools(server: McpServer, client: MooApiClient): void 
     async () => result(await client.request("GET", "/v1/health")),
   );
 
-  server.registerTool(
-    "moo_list_workspaces",
-    {
-      title: "List Moo Workspaces",
-      description: "List moo workspaces and their live session counts.",
-      inputSchema: z.object({}),
-    },
-    async () => result(await client.request("GET", "/v1/workspaces")),
-  );
+  registerWorkspaceListTool(server, client, "moo_workspace_list", "List Moo Workspaces");
+  registerWorkspaceListTool(server, client, "moo_workspace_ls", "List Moo Workspaces (Alias)");
 
   server.registerTool(
-    "moo_create_workspace",
+    "moo_workspace_create",
     {
       title: "Create Moo Workspace",
       description: "Create a moo workspace without creating a session.",
       inputSchema: requiredWorkspaceSchema,
     },
-    async ({ workspace }) => result(await client.request("POST", workspacePath(workspace))),
+    async ({ workspace }) => result(await client.request("POST", workspaceActionPath("create"), { workspace })),
   );
 
-  server.registerTool(
-    "moo_delete_workspace",
-    {
-      title: "Delete Moo Workspace",
-      description: "Terminate sessions and delete one moo workspace, or all workspaces.",
-      inputSchema: z.object({
-        workspace: z.string().optional().describe("Workspace id, or @default for the default workspace. Required unless all is true."),
-        all: z.boolean().default(false).describe("Delete every workspace and terminate every session."),
-      }),
-    },
-    async ({ workspace, all }) => {
-      if (all) return result(await client.request("DELETE", "/v1/workspaces?all=true"));
-      if (!workspace) throw new Error("workspace is required unless all is true");
-      return result(await client.request("DELETE", workspacePath(workspace)));
-    },
-  );
+  registerWorkspaceRemoveTool(server, client, "moo_workspace_remove", "Remove Moo Workspace");
+  registerWorkspaceRemoveTool(server, client, "moo_workspace_rm", "Remove Moo Workspace (Alias)");
 
   server.registerTool(
     "moo_list_sessions",
@@ -222,6 +201,47 @@ export function registerMooTools(server: McpServer, client: MooApiClient): void 
     async ({ workspace, session, since, timeout }) => {
       const query = new URLSearchParams({ since: String(since), timeout });
       return result(await client.request("GET", `${sessionPath(workspace, session)}/events?${query}`));
+    },
+  );
+}
+
+function registerWorkspaceListTool(
+  server: McpServer,
+  client: MooApiClient,
+  name: string,
+  title: string,
+): void {
+  server.registerTool(
+    name,
+    {
+      title,
+      description: "List moo workspaces and their live session counts.",
+      inputSchema: z.object({}),
+    },
+    async () => result(await client.request("GET", workspaceActionPath("list"))),
+  );
+}
+
+function registerWorkspaceRemoveTool(
+  server: McpServer,
+  client: MooApiClient,
+  name: string,
+  title: string,
+): void {
+  server.registerTool(
+    name,
+    {
+      title,
+      description: "Terminate sessions and remove one moo workspace, or all workspaces.",
+      inputSchema: z.object({
+        workspace: z.string().optional().describe("Workspace id, or @default for the default workspace. Required unless all is true."),
+        all: z.boolean().default(false).describe("Remove every workspace and terminate every session."),
+      }),
+    },
+    async ({ workspace, all }) => {
+      if (!all && !workspace) throw new Error("workspace is required unless all is true");
+      const body: JsonValue = all ? { all: true } : { workspace: workspace as string };
+      return result(await client.request("POST", workspaceActionPath(name.endsWith("_rm") ? "rm" : "remove"), body));
     },
   );
 }

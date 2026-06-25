@@ -47,9 +47,13 @@ Workspace path segments use the existing moo workspace name rules.
 | --- | --- | --- |
 | `GET` | `/v1/health` | Health check |
 | `GET` | `/v1/workspaces` | List workspaces and session counts |
-| `DELETE` | `/v1/workspaces?all=true` | Terminate sessions and delete every workspace |
+| `GET` | `/v1/workspace/list` | List workspaces and session counts |
+| `POST` | `/v1/workspace/create` | Create a workspace without creating a session |
+| `POST` | `/v1/workspace/remove` | Terminate sessions and remove one workspace, or every workspace |
+| `POST` | `/v1/workspace/rm` | Alias for `/v1/workspace/remove` |
 | `POST` | `/v1/workspaces/{workspace}` | Create a workspace without creating a session |
-| `DELETE` | `/v1/workspaces/{workspace}` | Terminate sessions and delete one workspace |
+| `DELETE` | `/v1/workspaces/{workspace}` | REST alias: terminate sessions and remove one workspace |
+| `DELETE` | `/v1/workspaces?all=true` | REST alias: terminate sessions and remove every workspace |
 | `GET` | `/v1/workspaces/{workspace}/sessions` | List live sessions in a workspace |
 | `POST` | `/v1/workspaces/{workspace}/sessions` | Create a detached session |
 | `GET` | `/v1/workspaces/{workspace}/sessions/{session}` | Inspect one session |
@@ -67,7 +71,9 @@ Workspace path segments use the existing moo workspace name rules.
 Create workspace:
 
 ```http
-POST /v1/workspaces/proj
+POST /v1/workspace/create
+
+{"workspace":"proj"}
 ```
 
 Returns `201`:
@@ -76,21 +82,28 @@ Returns `201`:
 {"id":"proj","workspace":"proj","created":true}
 ```
 
-Delete workspace:
+Remove workspace:
 
 ```http
-DELETE /v1/workspaces/proj
-DELETE /v1/workspaces?all=true
+POST /v1/workspace/remove
+
+{"workspace":"proj"}
+
+POST /v1/workspace/rm
+
+{"all":true}
 ```
 
 Responses include the number of sessions that were terminated:
 
 ```json
-{"workspace":"proj","deleted":true,"sessions":2}
+{"workspace":"proj","removed":true,"sessions":2}
 ```
 
-For `?all=true`, the response contains one entry per workspace. Named
-workspace directories are removed; the default runtime directory remains.
+For `{"all":true}`, the response contains one entry per workspace. Named
+workspace directories are removed; the default runtime directory remains. The
+REST `DELETE /v1/workspaces/{workspace}` and `DELETE /v1/workspaces?all=true`
+aliases return the same payloads.
 
 Create session:
 
@@ -238,9 +251,11 @@ Error body:
 ```sh
 API=http://127.0.0.1:8765
 
-curl "$API/v1/workspaces"
+curl "$API/v1/workspace/list"
 
-curl -sS -X POST "$API/v1/workspaces/proj"
+curl -sS -X POST "$API/v1/workspace/create" \
+  -H 'Content-Type: application/json' \
+  -d '{"workspace":"proj"}'
 
 curl -sS -X POST "$API/v1/workspaces/proj/sessions" \
   -H 'Content-Type: application/json' \
@@ -262,15 +277,19 @@ curl "$API/v1/workspaces/proj/sessions/build/transcript"
 
 curl -sS -X DELETE "$API/v1/workspaces/proj/sessions/build"
 
-curl -sS -X DELETE "$API/v1/workspaces/proj"
+curl -sS -X POST "$API/v1/workspace/remove" \
+  -H 'Content-Type: application/json' \
+  -d '{"workspace":"proj"}'
 
-curl -sS -X DELETE "$API/v1/workspaces?all=true"
+curl -sS -X POST "$API/v1/workspace/rm" \
+  -H 'Content-Type: application/json' \
+  -d '{"all":true}'
 ```
 
 With auth:
 
 ```sh
-curl -H "Authorization: Bearer $MOO_API_TOKEN" "$API/v1/workspaces"
+curl -H "Authorization: Bearer $MOO_API_TOKEN" "$API/v1/workspace/list"
 ```
 
 ## Non-goals

@@ -92,7 +92,7 @@ pub fn main() !void {
     if (eql(cmd, "attach") or eql(cmd, "at") or eql(cmd, "a")) return cmdAttach(alloc, rest);
     if (eql(cmd, "ui") or eql(cmd, "i")) return cmdUi(alloc, rest);
     if (eql(cmd, "ls") or eql(cmd, "list")) return cmdLs(alloc, rest);
-    if (eql(cmd, "ws")) return cmdWs(alloc, rest);
+    if (eql(cmd, "workspace") or eql(cmd, "ws")) return cmdWorkspace(alloc, rest);
     if (eql(cmd, "send")) return cmdSend(alloc, rest);
     if (eql(cmd, "peek")) return cmdPeek(alloc, rest);
     if (eql(cmd, "read")) return cmdRead(alloc, rest);
@@ -819,24 +819,24 @@ fn countSessions(alloc: std.mem.Allocator, dir: []const u8) !usize {
     return sessions.len;
 }
 
-fn cmdWs(alloc: std.mem.Allocator, args: []const [:0]const u8) !void {
-    if (args.len == 0 or std.mem.eql(u8, args[0], "--json")) return cmdWsLs(alloc, args);
-    if (isHelpFlag(args[0])) return printHelpPage("ws");
-    if (std.mem.eql(u8, args[0], "ls")) return cmdWsLs(alloc, args[1..]);
-    if (std.mem.eql(u8, args[0], "delete")) return cmdWsDelete(alloc, args[1..]);
-    usageFail("ws", "unknown workspace subcommand '{s}'", .{args[0]});
+fn cmdWorkspace(alloc: std.mem.Allocator, args: []const [:0]const u8) !void {
+    if (args.len == 0 or std.mem.eql(u8, args[0], "--json")) return cmdWorkspaceList(alloc, args);
+    if (isHelpFlag(args[0])) return printHelpPage("workspace");
+    if (std.mem.eql(u8, args[0], "list") or std.mem.eql(u8, args[0], "ls")) return cmdWorkspaceList(alloc, args[1..]);
+    if (std.mem.eql(u8, args[0], "remove") or std.mem.eql(u8, args[0], "rm")) return cmdWorkspaceRemove(alloc, args[1..]);
+    usageFail("workspace", "unknown workspace subcommand '{s}'", .{args[0]});
 }
 
-fn cmdWsLs(alloc: std.mem.Allocator, args: []const [:0]const u8) !void {
+fn cmdWorkspaceList(alloc: std.mem.Allocator, args: []const [:0]const u8) !void {
     var json = false;
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
         const arg = args[i];
-        if (isHelpFlag(arg)) return printHelpPage("ws");
+        if (isHelpFlag(arg)) return printHelpPage("workspace");
         if (std.mem.eql(u8, arg, "--json")) {
             json = true;
         } else {
-            usageFail("ws", "unexpected argument '{s}'", .{arg});
+            usageFail("workspace", "unexpected argument '{s}'", .{arg});
         }
     }
 
@@ -868,38 +868,38 @@ fn cmdWsLs(alloc: std.mem.Allocator, args: []const [:0]const u8) !void {
     try stdoutWrite(out.items);
 }
 
-fn cmdWsDelete(alloc: std.mem.Allocator, args: []const [:0]const u8) !void {
+fn cmdWorkspaceRemove(alloc: std.mem.Allocator, args: []const [:0]const u8) !void {
     var all = false;
     var workspace_arg: ?[]const u8 = null;
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
         const arg = args[i];
-        if (isHelpFlag(arg)) return printHelpPage("ws");
+        if (isHelpFlag(arg)) return printHelpPage("workspace");
         if (std.mem.eql(u8, arg, "--all")) {
             all = true;
         } else if (arg.len > 0 and arg[0] == '-') {
-            usageFail("ws", "unknown flag '{s}'", .{arg});
+            usageFail("workspace", "unknown flag '{s}'", .{arg});
         } else if (workspace_arg == null) {
             workspace_arg = arg;
         } else {
-            usageFail("ws", "unexpected argument '{s}'", .{arg});
+            usageFail("workspace", "unexpected argument '{s}'", .{arg});
         }
     }
     if (all and workspace_arg != null) {
-        usageFail("ws", "--all cannot be combined with a workspace name", .{});
+        usageFail("workspace", "--all cannot be combined with a workspace name", .{});
     }
-    if (all) return deleteAllWorkspacesCli(alloc);
+    if (all) return removeAllWorkspacesCli(alloc);
 
-    const raw = workspace_arg orelse usageFail("ws", "a workspace name or --all is required", .{});
+    const raw = workspace_arg orelse usageFail("workspace", "a workspace name or --all is required", .{});
     const workspace = workspaceFromCli(raw) catch
-        usageFail("ws", "invalid workspace name '{s}'", .{raw});
+        usageFail("workspace", "invalid workspace name '{s}'", .{raw});
     const dir = workspaceDirExisting(alloc, workspace) catch |err| switch (err) {
         error.NoWorkspace => fail(exit_no_session, "no workspace named {s}", .{raw}),
-        error.InvalidSessionName => usageFail("ws", "invalid workspace name '{s}'", .{raw}),
+        error.InvalidSessionName => usageFail("workspace", "invalid workspace name '{s}'", .{raw}),
         else => return err,
     };
     defer alloc.free(dir);
-    _ = try deleteWorkspaceDir(alloc, dir, workspace != null, false);
+    _ = try removeWorkspaceDir(alloc, dir, workspace != null, false);
     try stdoutPrint(alloc, "{s}\n", .{if (workspace) |ws| ws else "(default)"});
 }
 
@@ -909,16 +909,16 @@ fn workspaceFromCli(raw: []const u8) !?[]const u8 {
     return raw;
 }
 
-fn deleteAllWorkspacesCli(alloc: std.mem.Allocator) !void {
+fn removeAllWorkspacesCli(alloc: std.mem.Allocator) !void {
     const entries = try collectWorkspaces(alloc);
     defer freeWorkspaceEntries(alloc, entries);
     for (entries) |entry| {
-        _ = try deleteWorkspaceDir(alloc, entry.dir, entry.name.len != 0, false);
+        _ = try removeWorkspaceDir(alloc, entry.dir, entry.name.len != 0, false);
         try stdoutPrint(alloc, "{s}\n", .{if (entry.name.len == 0) "(default)" else entry.name});
     }
 }
 
-fn deleteWorkspaceDir(
+fn removeWorkspaceDir(
     alloc: std.mem.Allocator,
     dir: []const u8,
     remove_dir: bool,
@@ -2524,10 +2524,29 @@ fn dispatchHttp(
 
     var seg_buf: [8][]const u8 = undefined;
     const segs = splitPath(req.path, &seg_buf);
+    if (segs.len == 2 and eqlSegs(segs, &.{ "v1", "workspace" })) {
+        if (std.mem.eql(u8, req.method, "GET")) return handleWorkspaces(alloc, stream);
+    }
+    if (segs.len == 3 and std.mem.eql(u8, segs[0], "v1") and std.mem.eql(u8, segs[1], "workspace")) {
+        const action = segs[2];
+        if (std.mem.eql(u8, action, "list") and
+            (std.mem.eql(u8, req.method, "GET") or std.mem.eql(u8, req.method, "POST")))
+        {
+            return handleWorkspaces(alloc, stream);
+        }
+        if (std.mem.eql(u8, action, "create") and std.mem.eql(u8, req.method, "POST")) {
+            return handleCreateWorkspaceAction(alloc, stream, req.body);
+        }
+        if ((std.mem.eql(u8, action, "remove") or std.mem.eql(u8, action, "rm")) and
+            std.mem.eql(u8, req.method, "POST"))
+        {
+            return handleRemoveWorkspaceAction(alloc, stream, req.body);
+        }
+    }
     if (segs.len == 2 and eqlSegs(segs, &.{ "v1", "workspaces" })) {
         if (std.mem.eql(u8, req.method, "GET")) return handleWorkspaces(alloc, stream);
         if (std.mem.eql(u8, req.method, "DELETE")) {
-            if (queryBool(req.query, "all") orelse false) return handleDeleteAllWorkspaces(alloc, stream);
+            if (queryBool(req.query, "all") orelse false) return handleRemoveAllWorkspaces(alloc, stream);
             return sendError(stream, 400, "bad_request", "DELETE /v1/workspaces requires all=true");
         }
     }
@@ -2535,7 +2554,7 @@ fn dispatchHttp(
         const workspace = workspaceFromSegment(segs[2]) catch
             return sendError(stream, 400, "bad_workspace", "invalid workspace segment");
         if (std.mem.eql(u8, req.method, "POST")) return handleCreateWorkspace(alloc, stream, workspace);
-        if (std.mem.eql(u8, req.method, "DELETE")) return handleDeleteWorkspace(alloc, stream, workspace);
+        if (std.mem.eql(u8, req.method, "DELETE")) return handleRemoveWorkspace(alloc, stream, workspace);
     }
     if (segs.len >= 4 and std.mem.eql(u8, segs[0], "v1") and std.mem.eql(u8, segs[1], "workspaces") and
         std.mem.eql(u8, segs[3], "sessions"))
@@ -2610,6 +2629,12 @@ fn workspaceFromSegment(segment: []const u8) !?[]const u8 {
     return segment;
 }
 
+fn workspaceFromApiValue(value: []const u8) !?[]const u8 {
+    if (value.len == 0 or std.mem.eql(u8, value, "@default")) return null;
+    try paths.validateName(value);
+    return value;
+}
+
 fn workspaceDirHttp(alloc: std.mem.Allocator, workspace: ?[]const u8) ![]u8 {
     return paths.socketDirFor(alloc, workspace);
 }
@@ -2647,37 +2672,67 @@ fn handleCreateWorkspace(alloc: std.mem.Allocator, stream: std.net.Stream, works
     return sendOwnedJson(alloc, stream, 201, &out);
 }
 
-fn handleDeleteWorkspace(alloc: std.mem.Allocator, stream: std.net.Stream, workspace: ?[]const u8) !void {
+fn handleCreateWorkspaceAction(alloc: std.mem.Allocator, stream: std.net.Stream, body: []const u8) !void {
+    var parsed = std.json.parseFromSlice(std.json.Value, alloc, body, .{}) catch
+        return sendError(stream, 400, "bad_json", "request body must be a JSON object");
+    defer parsed.deinit();
+    if (parsed.value != .object) return sendError(stream, 400, "bad_json", "request body must be a JSON object");
+    const raw = jsonString(parsed.value, "workspace") orelse
+        return sendError(stream, 400, "bad_request", "workspace is required");
+    const workspace = workspaceFromApiValue(raw) catch
+        return sendError(stream, 400, "bad_workspace", "invalid workspace");
+    return handleCreateWorkspace(alloc, stream, workspace);
+}
+
+fn handleRemoveWorkspace(alloc: std.mem.Allocator, stream: std.net.Stream, workspace: ?[]const u8) !void {
     const dir = workspaceDirExisting(alloc, workspace) catch |err| switch (err) {
         error.NoWorkspace => return sendError(stream, 404, "not_found", "workspace not found"),
         error.InvalidSessionName => return sendError(stream, 400, "bad_workspace", "invalid workspace segment"),
         else => return err,
     };
     defer alloc.free(dir);
-    const sessions = try deleteWorkspaceDir(alloc, dir, workspace != null, false);
+    const sessions = try removeWorkspaceDir(alloc, dir, workspace != null, false);
     var out: std.ArrayList(u8) = .empty;
     defer out.deinit(alloc);
-    try appendWorkspaceDeleteJson(alloc, &out, workspace orelse "", sessions);
+    try appendWorkspaceRemoveJson(alloc, &out, workspace orelse "", sessions);
     try out.append(alloc, '\n');
     return sendOwnedJson(alloc, stream, 200, &out);
 }
 
-fn handleDeleteAllWorkspaces(alloc: std.mem.Allocator, stream: std.net.Stream) !void {
+fn handleRemoveWorkspaceAction(alloc: std.mem.Allocator, stream: std.net.Stream, body: []const u8) !void {
+    var parsed = std.json.parseFromSlice(std.json.Value, alloc, body, .{}) catch
+        return sendError(stream, 400, "bad_json", "request body must be a JSON object");
+    defer parsed.deinit();
+    if (parsed.value != .object) return sendError(stream, 400, "bad_json", "request body must be a JSON object");
+    const all = jsonBool(parsed.value, "all") orelse false;
+    const raw = jsonString(parsed.value, "workspace");
+    if (all and raw != null) {
+        return sendError(stream, 400, "bad_request", "all cannot be combined with workspace");
+    }
+    if (all) return handleRemoveAllWorkspaces(alloc, stream);
+    const workspace_raw = raw orelse
+        return sendError(stream, 400, "bad_request", "workspace is required unless all is true");
+    const workspace = workspaceFromApiValue(workspace_raw) catch
+        return sendError(stream, 400, "bad_workspace", "invalid workspace");
+    return handleRemoveWorkspace(alloc, stream, workspace);
+}
+
+fn handleRemoveAllWorkspaces(alloc: std.mem.Allocator, stream: std.net.Stream) !void {
     const entries = try collectWorkspaces(alloc);
     defer freeWorkspaceEntries(alloc, entries);
     var out: std.ArrayList(u8) = .empty;
     defer out.deinit(alloc);
-    try out.appendSlice(alloc, "{\"deleted\":true,\"workspaces\":[");
+    try out.appendSlice(alloc, "{\"removed\":true,\"workspaces\":[");
     for (entries, 0..) |entry, idx| {
         if (idx > 0) try out.append(alloc, ',');
-        const sessions = try deleteWorkspaceDir(alloc, entry.dir, entry.name.len != 0, false);
-        try appendWorkspaceDeleteJson(alloc, &out, entry.name, sessions);
+        const sessions = try removeWorkspaceDir(alloc, entry.dir, entry.name.len != 0, false);
+        try appendWorkspaceRemoveJson(alloc, &out, entry.name, sessions);
     }
     try out.appendSlice(alloc, "]}\n");
     return sendOwnedJson(alloc, stream, 200, &out);
 }
 
-fn appendWorkspaceDeleteJson(
+fn appendWorkspaceRemoveJson(
     alloc: std.mem.Allocator,
     out: *std.ArrayList(u8),
     workspace: []const u8,
@@ -2685,7 +2740,7 @@ fn appendWorkspaceDeleteJson(
 ) !void {
     try out.appendSlice(alloc, "{\"workspace\":");
     try appendJsonString(alloc, out, workspace);
-    try out.print(alloc, ",\"deleted\":true,\"sessions\":{d}}}", .{sessions});
+    try out.print(alloc, ",\"removed\":true,\"sessions\":{d}}}", .{sessions});
 }
 
 fn appendWorkspaceJson(

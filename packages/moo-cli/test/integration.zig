@@ -1788,20 +1788,20 @@ test "http api: serve lifecycle" {
     try expectStatus(health, 200);
     try expectBodyContains(health, "\"ok\":true");
 
-    const workspaces = try api.request("GET", "/v1/workspaces", "", null);
+    const workspaces = try api.request("GET", "/v1/workspace/list", "", null);
     defer workspaces.deinit(alloc);
     try expectStatus(workspaces, 200);
     try expectBodyContains(workspaces, "\"workspace\":\"\"");
 }
 
-test "http api: create and delete workspace without creating a session" {
+test "http api: create and remove workspace without creating a session" {
     const alloc = std.testing.allocator;
     var h = try Harness.init(alloc);
     defer h.deinit();
     var api = try ApiServer.start(&h, null);
     defer api.deinit();
 
-    const created = try api.request("POST", "/v1/workspaces/empty", "", null);
+    const created = try api.request("POST", "/v1/workspace/create", "{\"workspace\":\"empty\"}", null);
     defer created.deinit(alloc);
     try expectStatus(created, 201);
     try expectBodyContains(created, "\"workspace\":\"empty\"");
@@ -1812,13 +1812,14 @@ test "http api: create and delete workspace without creating a session" {
     try expectBodyContains(listed, "\"workspace\":\"empty\"");
     try expectBodyContains(listed, "\"sessions\":0");
 
-    const deleted = try api.request("DELETE", "/v1/workspaces/empty", "", null);
-    defer deleted.deinit(alloc);
-    try expectStatus(deleted, 200);
-    try expectBodyContains(deleted, "\"workspace\":\"empty\"");
-    try expectBodyContains(deleted, "\"sessions\":0");
+    const removed = try api.request("POST", "/v1/workspace/remove", "{\"workspace\":\"empty\"}", null);
+    defer removed.deinit(alloc);
+    try expectStatus(removed, 200);
+    try expectBodyContains(removed, "\"workspace\":\"empty\"");
+    try expectBodyContains(removed, "\"removed\":true");
+    try expectBodyContains(removed, "\"sessions\":0");
 
-    const missing = try api.request("DELETE", "/v1/workspaces/empty", "", null);
+    const missing = try api.request("POST", "/v1/workspace/remove", "{\"workspace\":\"empty\"}", null);
     defer missing.deinit(alloc);
     try expectStatus(missing, 404);
 }
@@ -1875,7 +1876,7 @@ test "http api: workspace session management" {
     try expectStatus(missing, 404);
 }
 
-test "http api: delete all workspaces terminates sessions" {
+test "http api: remove all workspaces terminates sessions" {
     const alloc = std.testing.allocator;
     var h = try Harness.init(alloc);
     defer h.deinit();
@@ -1899,11 +1900,12 @@ test "http api: delete all workspaces terminates sessions" {
     defer proj.deinit(alloc);
     try expectStatus(proj, 201);
 
-    const deleted = try api.request("DELETE", "/v1/workspaces?all=true", "", null);
-    defer deleted.deinit(alloc);
-    try expectStatus(deleted, 200);
-    try expectBodyContains(deleted, "\"workspace\":\"\"");
-    try expectBodyContains(deleted, "\"workspace\":\"proj\"");
+    const removed = try api.request("POST", "/v1/workspace/rm", "{\"all\":true}", null);
+    defer removed.deinit(alloc);
+    try expectStatus(removed, 200);
+    try expectBodyContains(removed, "\"removed\":true");
+    try expectBodyContains(removed, "\"workspace\":\"\"");
+    try expectBodyContains(removed, "\"workspace\":\"proj\"");
 
     const default_sessions = try api.request("GET", "/v1/workspaces/@default/sessions", "", null);
     defer default_sessions.deinit(alloc);
@@ -2634,15 +2636,15 @@ test "invalid workspace name is clean across commands and creates nothing" {
     try std.testing.expectError(error.FileNotFound, std.fs.cwd().access(ws_dir, .{}));
 }
 
-// -- moo ws -------------------------------------------------------------------
+// -- moo workspace ------------------------------------------------------------
 
-/// Look up a workspace's session count in `moo ws --json`. The default
+/// Look up a workspace's session count in `moo workspace list --json`. The default
 /// workspace is reported under the empty string, which a real workspace name
 /// can never be (validateName rejects ""), so "" unambiguously denotes it.
 /// Returns null when no entry names the workspace. Mirrors lsHasSession's
 /// order-independent parse: entries are matched by name, not array position.
 fn wsCount(h: *Harness, workspace: []const u8) !?i64 {
-    const result = try h.run(&.{ "ws", "--json" });
+    const result = try h.run(&.{ "workspace", "list", "--json" });
     defer h.alloc.free(result.stdout);
     defer h.alloc.free(result.stderr);
     if (result.term != .Exited or result.term.Exited != 0) return error.WsFailed;
@@ -2656,7 +2658,7 @@ fn wsCount(h: *Harness, workspace: []const u8) !?i64 {
     return null;
 }
 
-test "ws --json reports the default and every workspace with a session count" {
+test "workspace list reports the default and every workspace with a session count" {
     const alloc = std.testing.allocator;
     var h = try Harness.init(alloc);
     defer h.deinit();
@@ -2671,9 +2673,15 @@ test "ws --json reports the default and every workspace with a session count" {
     try std.testing.expectEqual(@as(?i64, 1), try wsCount(&h, ""));
     try std.testing.expectEqual(@as(?i64, 2), try wsCount(&h, "alpha"));
     try std.testing.expectEqual(@as(?i64, 1), try wsCount(&h, "beta"));
+
+    const alias = try h.run(&.{ "ws", "ls", "--json" });
+    defer alloc.free(alias.stdout);
+    defer alloc.free(alias.stderr);
+    try std.testing.expect(alias.term == .Exited and alias.term.Exited == 0);
+    try std.testing.expect(std.mem.indexOf(u8, alias.stdout, "\"workspace\":\"alpha\"") != null);
 }
 
-test "ws delete removes a named workspace without touching default" {
+test "workspace rm removes a named workspace without touching default" {
     const alloc = std.testing.allocator;
     var h = try Harness.init(alloc);
     defer h.deinit();
@@ -2681,18 +2689,18 @@ test "ws delete removes a named workspace without touching default" {
     try h.startDetached("base", &.{"cat"});
     try startDetachedWs(&h, "alpha", "a1", &.{"cat"});
 
-    try h.runOk(&.{ "ws", "delete", "alpha" });
+    try h.runOk(&.{ "workspace", "rm", "alpha" });
 
     var deadline = Deadline.init(default_timeout_ms);
     while (true) {
         if ((try wsCount(&h, "alpha")) == null) break;
-        try deadline.tick("workspace alpha survived ws delete");
+        try deadline.tick("workspace alpha survived workspace rm");
     }
     try std.testing.expectEqual(@as(?i64, 1), try wsCount(&h, ""));
     try std.testing.expect(try lsHasSession(&h, &.{}, "base"));
 }
 
-test "ws delete --all terminates sessions and removes named workspaces" {
+test "workspace remove --all terminates sessions and removes named workspaces" {
     const alloc = std.testing.allocator;
     var h = try Harness.init(alloc);
     defer h.deinit();
@@ -2701,7 +2709,7 @@ test "ws delete --all terminates sessions and removes named workspaces" {
     try startDetachedWs(&h, "alpha", "a1", &.{"cat"});
     try startDetachedWs(&h, "beta", "b1", &.{"cat"});
 
-    try h.runOk(&.{ "ws", "delete", "--all" });
+    try h.runOk(&.{ "workspace", "remove", "--all" });
 
     var deadline = Deadline.init(default_timeout_ms);
     while (true) {
@@ -2709,11 +2717,11 @@ test "ws delete --all terminates sessions and removes named workspaces" {
         const alpha_count = try wsCount(&h, "alpha");
         const beta_count = try wsCount(&h, "beta");
         if (default_count != null and default_count.? == 0 and alpha_count == null and beta_count == null) break;
-        try deadline.tick("workspaces survived ws delete --all");
+        try deadline.tick("workspaces survived workspace remove --all");
     }
 }
 
-test "ws human output lists workspace names and counts" {
+test "workspace human output lists workspace names and counts" {
     const alloc = std.testing.allocator;
     var h = try Harness.init(alloc);
     defer h.deinit();
@@ -2724,7 +2732,7 @@ test "ws human output lists workspace names and counts" {
     try startDetachedWs(&h, "alpha", "a1", &.{"cat"});
     try startDetachedWs(&h, "alpha", "a2", &.{"cat"});
 
-    const result = try h.run(&.{"ws"});
+    const result = try h.run(&.{"workspace"});
     defer alloc.free(result.stdout);
     defer alloc.free(result.stderr);
     try std.testing.expect(result.term == .Exited and result.term.Exited == 0);
@@ -2733,7 +2741,7 @@ test "ws human output lists workspace names and counts" {
     try std.testing.expect(std.mem.indexOf(u8, result.stdout, "2") != null);
 }
 
-test "ws --json with no workspaces returns just the default entry" {
+test "ws alias --json with no workspaces returns just the default entry" {
     const alloc = std.testing.allocator;
     var h = try Harness.init(alloc);
     defer h.deinit();
