@@ -140,7 +140,9 @@ export function registerMooTools(server: McpServer, client: MooApiClient): void 
         key: z.string().optional(),
         keys: z.array(z.string()).optional(),
         base64: z.string().optional(),
-        enter: z.boolean().optional(),
+        enter: z.boolean().optional().describe(
+          "Append Enter after the payload. Defaults to true when text is sent; pass false to suppress.",
+        ),
       }),
     },
     async ({ workspace, session, ...body }) => result(await client.request("POST", `${sessionPath(workspace, session)}/input`, body)),

@@ -1007,7 +1007,7 @@ fn cmdSend(alloc: std.mem.Allocator, args: []const [:0]const u8) !void {
     var name_arg: ?[]const u8 = null;
     var text: ?[]const u8 = null;
     var keys_arg: ?[]const u8 = null;
-    var enter = false;
+    var no_enter = false;
     var stdin = false;
     var ws_flag: ?[]const u8 = null;
 
@@ -1015,8 +1015,8 @@ fn cmdSend(alloc: std.mem.Allocator, args: []const [:0]const u8) !void {
     while (i < args.len) : (i += 1) {
         const arg = args[i];
         if (isHelpFlag(arg)) return printHelpPage("send");
-        if (std.mem.eql(u8, arg, "--enter")) {
-            enter = true;
+        if (std.mem.eql(u8, arg, "--no-enter")) {
+            no_enter = true;
         } else if (std.mem.eql(u8, arg, "--stdin")) {
             stdin = true;
         } else if (flagValue("send", "--text", args, &i)) |v| {
@@ -1067,7 +1067,7 @@ fn cmdSend(alloc: std.mem.Allocator, args: []const [:0]const u8) !void {
         defer alloc.free(data);
         try payload.appendSlice(alloc, data);
     }
-    if (enter) try payload.append(alloc, '\r');
+    if (text != null and !no_enter) try payload.append(alloc, '\r');
 
     if (payload.items.len == 0) usageFail("send", "nothing to send", .{});
     if (std.mem.indexOfScalar(u8, payload.items, 0) != null) {
@@ -2992,7 +2992,9 @@ fn handleInput(
             else => return sendError(stream, 400, "bad_key", "keys must be an array"),
         };
     }
-    if (jsonBool(parsed.value, "enter") orelse false) try payload.append(alloc, '\r');
+    const has_text = jsonString(parsed.value, "text") != null;
+    const should_enter = jsonBool(parsed.value, "enter") orelse has_text;
+    if (should_enter) try payload.append(alloc, '\r');
     if (payload.items.len == 0) return sendError(stream, 400, "empty_input", "nothing to send");
     if (std.mem.indexOfScalar(u8, payload.items, 0) != null) {
         return sendError(stream, 400, "nul_input", "NUL bytes are not supported by v1 input");

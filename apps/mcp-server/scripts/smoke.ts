@@ -91,6 +91,33 @@ try {
     throw new Error(`unexpected remove all result: ${JSON.stringify(removedAll)}`);
   }
 
+  send(8, "tools/call", {
+    name: "moo_create_session",
+    arguments: { workspace: "@default", name: "smoke-send", command: ["cat"], rows: 12, cols: 40 },
+  });
+  const session = await expectResult(reader, 8) as { structuredContent?: { session?: string } };
+  if (session.structuredContent?.session !== "smoke-send") {
+    throw new Error(`unexpected create session result: ${JSON.stringify(session)}`);
+  }
+
+  send(9, "tools/call", {
+    name: "moo_send_input",
+    arguments: { workspace: "@default", session: "smoke-send", text: "enter-default-smoke" },
+  });
+  const sent = await expectResult(reader, 9) as { structuredContent?: { sent?: boolean } };
+  if (sent.structuredContent?.sent !== true) {
+    throw new Error(`unexpected send_input result: ${JSON.stringify(sent)}`);
+  }
+
+  send(10, "tools/call", {
+    name: "moo_wait_session",
+    arguments: { workspace: "@default", session: "smoke-send", text: "enter-default-smoke", timeout: "5s" },
+  });
+  await expectResult(reader, 10);
+
+  send(11, "tools/call", { name: "moo_delete_session", arguments: { workspace: "@default", session: "smoke-send" } });
+  await expectResult(reader, 11);
+
   child.stdin.end();
   await waitForExit(child);
 } finally {

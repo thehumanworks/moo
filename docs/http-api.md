@@ -127,11 +127,12 @@ Session object:
 Input request:
 
 ```json
-{"text":"make test","enter":true}
+{"text":"make test"}
 ```
 
-Also accepted: `{"key":"C-c"}`, `{"keys":["Up","Enter"]}`, and
-`{"base64":"...","enter":true}`. NUL bytes are rejected because the current
+`enter` defaults to `true` when `text` is present; pass `"enter":false` to
+suppress. Also accepted: `{"key":"C-c"}`, `{"keys":["Up","Enter"]}`, and
+`{"base64":"..."}`. NUL bytes are rejected because the current
 daemon control protocol uses NUL-separated argv payloads.
 
 Screen response:
@@ -248,7 +249,7 @@ curl -sS -X POST "$API/v1/workspaces/proj/sessions" \
 
 curl -sS -X POST "$API/v1/workspaces/proj/sessions/build/input" \
   -H 'Content-Type: application/json' \
-  -d '{"text":"echo READY","enter":true}'
+  -d '{"text":"echo READY"}'
 
 curl -sS -X POST "$API/v1/workspaces/proj/sessions/build/wait" \
   -H 'Content-Type: application/json' \

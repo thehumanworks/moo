@@ -326,13 +326,14 @@ pub const commands = [_]Entry{
         \\
         \\Type into a session, exactly as if the text had been typed
         \\at the keyboard. --text is sent literally: no escape
-        \\processing and no implicit newline, so there is never a
-        \\quoting layer to fight. With neither --text nor --key,
-        \\bytes are read from stdin (binary safe, NUL excluded).
+        \\processing and no quoting layer to fight. Enter is appended
+        \\after --text by default (--no-enter to suppress). With neither
+        \\--text nor --key, bytes are read from stdin (binary safe, NUL
+        \\excluded; no implicit Enter).
         \\
         \\flags:
-        \\  --text <text>  the text to type
-        \\  --enter        append Enter after everything else
+        \\  --text <text>  the text to type (Enter is appended by default)
+        \\  --no-enter     do not append Enter after --text
         \\  --key <list>   send named keys, comma separated:
         \\                 Enter, Tab, Escape, Space, Backspace,
         \\                 Up, Down, Left, Right, Home, End, C-a..C-z.
@@ -342,7 +343,8 @@ pub const commands = [_]Entry{
         \\                 (see 'moo help workspaces')
         \\
         \\examples:
-        \\  moo send build --text 'make test' --enter   run a command
+        \\  moo send build --text 'make test'           run a command
+        \\  moo send build --text 'partial' --no-enter type without submitting
         \\  moo send build --key C-c                    interrupt it
         \\  printf 'y\n' | moo send build               pipe bytes in
         \\
@@ -535,7 +537,7 @@ pub const topics = [_]Entry{
         \\canonical loop:
         \\
         \\  moo new build -d -- bash               # 1. headless session
-        \\  moo send build --text 'make' --enter   # 2. type into it
+        \\  moo send build --text 'make'           # 2. type into it
         \\  moo wait build --idle                  # 3. let output settle
         \\  moo peek build --scrollback            # 4. read the screen
         \\  moo kill build                         # 5. clean up
@@ -551,9 +553,9 @@ pub const topics = [_]Entry{
         \\  moo wait <name> ... --timeout <dur>   exit 4 on timeout
         \\
         \\sending input:
-        \\  send is literal: no escapes, no implicit newline, no
-        \\  quoting layer. --enter submits; --key Enter,C-c,Up names
-        \\  control keys; stdin mode is binary safe.
+        \\  send is literal: no escapes, no quoting layer. --text
+        \\  appends Enter by default (--no-enter to suppress); --key
+        \\  Enter,C-c,Up names control keys; stdin mode is binary safe.
         \\
         \\machine-readable output:
         \\  moo ls --json    [{"name","attached","idle_ms","title"}]
@@ -584,7 +586,7 @@ pub const topics = [_]Entry{
         \\status of what the agent is doing.
         \\
         \\  moo new bot --agent claude -d   # 1. wrap Claude Code
-        \\  moo send bot --text 'fix the build' --enter
+        \\  moo send bot --text 'fix the build'
         \\  moo wait bot --idle             # 2. coarse wait: output settles
         \\  moo read bot                    # 3. read the conversation
         \\  moo kill bot                    # 4. clean up (drops sidecar)

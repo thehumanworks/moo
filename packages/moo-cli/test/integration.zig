@@ -189,7 +189,7 @@ const Harness = struct {
 
     /// Type text into the session, followed by Enter.
     fn sendLine(self: *Harness, session: []const u8, text: []const u8) !void {
-        try self.runOk(&.{ "send", session, "--text", text, "--enter" });
+        try self.runOk(&.{ "send", session, "--text", text });
     }
 
     /// Poll the session's screen contents until `needle` shows up.
@@ -1201,7 +1201,7 @@ test "help: overview, command pages, topics, and version" {
     defer alloc.free(send_page.stdout);
     defer alloc.free(send_page.stderr);
     try std.testing.expect(send_page.term.Exited == 0);
-    try std.testing.expect(std.mem.indexOf(u8, send_page.stdout, "--enter") != null);
+    try std.testing.expect(std.mem.indexOf(u8, send_page.stdout, "--no-enter") != null);
     try std.testing.expect(std.mem.indexOf(u8, send_page.stdout, "--key") != null);
 
     const automation = try h.run(&.{ "help", "automation" });
@@ -1287,7 +1287,7 @@ test "send --key presses named keys" {
     try h.startDetached("keys", &.{"cat"});
     // Type a line without Enter, then press Enter by name; cat only
     // echoes the line back once the key arrives.
-    try h.runOk(&.{ "send", "keys", "--text", "key-mark" });
+    try h.runOk(&.{ "send", "keys", "--text", "key-mark", "--no-enter" });
     try h.runOk(&.{ "send", "keys", "--key", "Enter" });
     const content = try h.waitPeekContains("keys", "key-mark");
     defer alloc.free(content);
@@ -2000,7 +2000,7 @@ test "http api: drive wait screen" {
     const input = try api.request(
         "POST",
         "/v1/workspaces/@default/sessions/drv/input",
-        "{\"text\":\"http-drive\",\"enter\":true}",
+        "{\"text\":\"http-drive\"}",
         null,
     );
     defer input.deinit(alloc);
@@ -2142,7 +2142,7 @@ test "http api: event cursors" {
     const input = try api.request(
         "POST",
         "/v1/workspaces/@default/sessions/ev/input",
-        "{\"text\":\"event-mark\",\"enter\":true}",
+        "{\"text\":\"event-mark\"}",
         null,
     );
     defer input.deinit(alloc);
@@ -2595,7 +2595,7 @@ test "nested moo inside a workspace session is confined to that workspace" {
     const exe_abs = try std.fs.cwd().realpath(exe_path, &exe_buf);
     const cmd = try std.fmt.allocPrint(alloc, "{s} ls", .{exe_abs});
     defer alloc.free(cmd);
-    try h.runOk(&.{ "send", "-w", "proj", "shell", "--text", cmd, "--enter" });
+    try h.runOk(&.{ "send", "-w", "proj", "shell", "--text", cmd });
 
     // The nested listing shows the proj session and not the default one.
     // Assert on the distinctive names rather than exact layout, so terminal
