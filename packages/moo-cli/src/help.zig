@@ -44,7 +44,7 @@ pub const overview =
     \\    mcp                          run the bundled stdio MCP server
     \\
     \\  Information
-    \\    workspace [list|remove]      list or remove workspaces (alias: ws)
+    \\    workspace [list|create|remove] list, create, or remove workspaces (alias: ws)
     \\    version                      print the version
     \\    help [page]                  this overview, or detailed help
     \\
@@ -227,18 +227,24 @@ pub const commands = [_]Entry{
         .alias = "ws",
         .body =
         \\usage: moo workspace [list|ls] [--json]
+        \\       moo workspace create <name> [--cwd <path>]
         \\       moo workspace rm <workspace|@default>
         \\       moo workspace remove <workspace|@default>
         \\       moo workspace rm --all
         \\       moo ws ...                    short alias for workspace
         \\
-        \\List or remove workspaces. With no subcommand, 'moo workspace'
+        \\List, create, or remove workspaces. With no subcommand, 'moo workspace'
         \\behaves like 'moo workspace list': it lists every workspace and how many live
         \\sessions each holds. The default workspace (sessions created
         \\without -w) is listed first as "(default)", followed by every
         \\named workspace in name order. Each existing workspace appears
         \\even when its count is 0, so a workspace you created but later
         \\emptied is still visible.
+        \\
+        \\'moo workspace create <name>' creates a named workspace directory without
+        \\starting a session. Optional --cwd sets the working directory for every
+        \\session created in that workspace; the path is stored as an absolute
+        \\path in .workspace.json after validation.
         \\
         \\'moo workspace rm <workspace>' terminates that workspace's sessions,
         \\stops its UI manager state, and removes the named workspace
@@ -250,14 +256,16 @@ pub const commands = [_]Entry{
         \\-w/--workspace flag and is unaffected by $MOO_WORKSPACE.
         \\
         \\flags:
-        \\  --json  emit a JSON array: [{"workspace","sessions"}], default
+        \\  --json  emit a JSON array: [{"workspace","sessions","cwd"?}], default
         \\          first. The default workspace is reported with the
         \\          empty-string name "" (a real workspace name can never
         \\          be empty), so scripts can distinguish it from a named
-        \\          one without matching the "(default)" label.
+        \\          one without matching the "(default)" label. cwd is included
+        \\          when configured for the workspace.
         \\
         \\examples:
         \\  moo workspace                a WORKSPACE / SESSIONS table
+        \\  moo workspace create proj --cwd ~/src/myapp
         \\  moo workspace list --json | jq .   per-workspace counts, for scripts
         \\  moo workspace rm proj        remove one workspace
         \\  moo workspace remove --all   terminate and remove all workspaces

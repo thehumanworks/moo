@@ -169,6 +169,99 @@ pub fn storeDir(alloc: std.mem.Allocator, dir: []const u8, name: []const u8) ![]
     return std.fs.path.join(alloc, &.{ dir, sub });
 }
 
+pub const WorkspaceConfigError = error{
+    InvalidWorkspaceCwd,
+};
+
+pub const WorkspaceConfig = struct {
+    cwd: ?[]u8 = null,
+
+    pub fn deinit(self: *WorkspaceConfig, alloc: std.mem.Allocator) void {
+        if (self.cwd) |c| alloc.free(c);
+        self.cwd = null;
+    }
+};
+
+/// Per-workspace metadata: "<dir>/.workspace.json" (optional cwd and future fields).
+pub fn workspaceConfigPath(alloc: std.mem.Allocator, dir: []const u8) ![]u8 {
+    return std.fs.path.join(alloc, &.{ dir, ".workspace.json" });
+}
+
+/// Resolve and validate a workspace cwd: must exist, be a directory, and is stored
+/// as an absolute path via realpath.
+pub fn validateWorkspaceCwd(alloc: std.mem.Allocator, path: []const u8) WorkspaceConfigError![]u8 {
+    var dir = std.fs.cwd().openDir(path, .{}) catch return error.InvalidWorkspaceCwd;
+    defer dir.close();
+    return dir.realpathAlloc(alloc, ".") catch return error.InvalidWorkspaceCwd;
+}
+
+pub fn readWorkspaceConfig(alloc: std.mem.Allocator, dir: []const u8) !WorkspaceConfig {
+    const path = try workspaceConfigPath(alloc, dir);
+    defer alloc.free(path);
+    const data = std.fs.cwd().readFileAlloc(alloc, path, 4096) catch |err| switch (err) {
+        error.FileNotFound => return .{},
+        else => return err,
+    };
+    defer alloc.free(data);
+
+    var parsed = std.json.parseFromSlice(std.json.Value, alloc, data, .{}) catch return .{};
+    defer parsed.deinit();
+    if (parsed.value != .object) return .{};
+    const cwd_val = parsed.value.object.get("cwd") orelse return .{};
+    const cwd_raw = switch (cwd_val) {
+        .string => |s| s,
+        else => return .{},
+    };
+    if (cwd_raw.len == 0) return .{};
+    const cwd = validateWorkspaceCwd(alloc, cwd_raw) catch return .{};
+    return .{ .cwd = cwd };
+}
+
+pub fn writeWorkspaceConfig(alloc: std.mem.Allocator, dir: []const u8, cwd: []const u8) !void {
+    const abs = try validateWorkspaceCwd(alloc, cwd);
+    defer alloc.free(abs);
+
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(alloc);
+    try out.appendSlice(alloc, "{\"cwd\":");
+    try appendJsonString(alloc, &out, abs);
+    try out.appendSlice(alloc, "}\n");
+
+    const path = try workspaceConfigPath(alloc, dir);
+    defer alloc.free(path);
+    try std.fs.cwd().writeFile(.{ .sub_path = path, .data = out.items });
+}
+
+fn appendJsonString(alloc: std.mem.Allocator, out: *std.ArrayList(u8), s: []const u8) !void {
+    try out.append(alloc, '"');
+    for (s) |c| switch (c) {
+        '"', '\\' => {
+            try out.append(alloc, '\\');
+            try out.append(alloc, c);
+        },
+        '\n' => try out.appendSlice(alloc, "\\n"),
+        '\r' => try out.appendSlice(alloc, "\\r"),
+        '\t' => try out.appendSlice(alloc, "\\t"),
+        else => try out.append(alloc, c),
+    };
+    try out.append(alloc, '"');
+}
+
+/// Cwd for new sessions in a workspace: configured workspace cwd when set,
+/// otherwise the creating process's current directory.
+pub fn resolveSessionCwd(alloc: std.mem.Allocator, workspace_dir: []const u8) ![]u8 {
+    var config = readWorkspaceConfig(alloc, workspace_dir) catch return try processCwd(alloc);
+    defer config.deinit(alloc);
+    if (config.cwd) |cwd| return try alloc.dupe(u8, cwd);
+    return try processCwd(alloc);
+}
+
+fn processCwd(alloc: std.mem.Allocator) ![]u8 {
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const cwd = std.posix.getcwd(&buf) catch return try alloc.dupe(u8, ".");
+    return try alloc.dupe(u8, cwd);
+}
+
 /// Best-effort removal of a session's agent sidecar and transcript store. The
 /// socket itself is owned by the daemon and removed on quit, so it is left
 /// alone here.
@@ -255,6 +348,71 @@ pub fn listSessions(alloc: std.mem.Allocator, dir_path: []const u8) ![][]u8 {
     }
 
     return names.toOwnedSlice(alloc);
+}
+
+test "validateWorkspaceCwd resolves an existing directory to an absolute path" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const rel = try tmp.dir.realpathAlloc(alloc, ".");
+    defer alloc.free(rel);
+
+    const got = try validateWorkspaceCwd(alloc, rel);
+    defer alloc.free(got);
+    try std.testing.expect(std.fs.path.isAbsolute(got));
+    try std.testing.expectEqualStrings(rel, got);
+}
+
+test "validateWorkspaceCwd rejects missing paths and files" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const base = try tmp.dir.realpathAlloc(alloc, ".");
+    defer alloc.free(base);
+
+    const missing = try std.fs.path.join(alloc, &.{ base, "missing" });
+    defer alloc.free(missing);
+    try std.testing.expectError(error.InvalidWorkspaceCwd, validateWorkspaceCwd(alloc, missing));
+
+    try tmp.dir.writeFile(.{ .sub_path = "file.txt", .data = "" });
+    const file_path = try std.fs.path.join(alloc, &.{ base, "file.txt" });
+    defer alloc.free(file_path);
+    try std.testing.expectError(error.InvalidWorkspaceCwd, validateWorkspaceCwd(alloc, file_path));
+}
+
+test "workspace config round trip stores absolute cwd" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try tmp.dir.realpathAlloc(alloc, ".");
+    defer alloc.free(dir);
+
+    const sub = try std.fs.path.join(alloc, &.{ dir, "proj" });
+    defer alloc.free(sub);
+    try std.fs.cwd().makePath(sub);
+
+    try writeWorkspaceConfig(alloc, dir, sub);
+    var config = try readWorkspaceConfig(alloc, dir);
+    defer config.deinit(alloc);
+    try std.testing.expect(config.cwd != null);
+    try std.testing.expectEqualStrings(sub, config.cwd.?);
+}
+
+test "resolveSessionCwd prefers workspace config over process cwd" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try tmp.dir.realpathAlloc(alloc, ".");
+    defer alloc.free(dir);
+
+    const ws_cwd = try std.fs.path.join(alloc, &.{ dir, "work" });
+    defer alloc.free(ws_cwd);
+    try std.fs.cwd().makePath(ws_cwd);
+    try writeWorkspaceConfig(alloc, dir, ws_cwd);
+
+    const got = try resolveSessionCwd(alloc, dir);
+    defer alloc.free(got);
+    try std.testing.expectEqualStrings(ws_cwd, got);
 }
 
 test "validateName" {

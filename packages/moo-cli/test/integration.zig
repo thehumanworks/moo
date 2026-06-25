@@ -2788,6 +2788,98 @@ test "ws alias --json with no workspaces returns just the default entry" {
     try std.testing.expectEqual(@as(i64, 1), entry.get("sessions").?.integer);
 }
 
+fn wsCwd(h: *Harness, workspace: []const u8) !?[]const u8 {
+    const result = try h.run(&.{ "workspace", "list", "--json" });
+    defer h.alloc.free(result.stdout);
+    defer h.alloc.free(result.stderr);
+    if (result.term != .Exited or result.term.Exited != 0) return error.WsFailed;
+    var parsed = try std.json.parseFromSlice(std.json.Value, h.alloc, result.stdout, .{});
+    defer parsed.deinit();
+    for (parsed.value.array.items) |entry| {
+        if (!std.mem.eql(u8, entry.object.get("workspace").?.string, workspace)) continue;
+        const cwd_val = entry.object.get("cwd") orelse return null;
+        return try h.alloc.dupe(u8, cwd_val.string);
+    }
+    return null;
+}
+
+test "workspace create --cwd persists absolute path and list reports it" {
+    const alloc = std.testing.allocator;
+    var h = try Harness.init(alloc);
+    defer h.deinit();
+
+    const ws_cwd = try std.fs.path.join(alloc, &.{ h.dir, "wscwd" });
+    defer alloc.free(ws_cwd);
+    try std.fs.cwd().makePath(ws_cwd);
+    const abs = try std.fs.cwd().realpathAlloc(alloc, ws_cwd);
+    defer alloc.free(abs);
+
+    try h.runOk(&.{ "workspace", "create", "proj", "--cwd", abs });
+    const listed = try wsCwd(&h, "proj");
+    defer if (listed) |c| alloc.free(c);
+    try std.testing.expect(listed != null);
+    try std.testing.expectEqualStrings(abs, listed.?);
+}
+
+test "workspace cwd is pwd for every session in that workspace" {
+    const alloc = std.testing.allocator;
+    var h = try Harness.init(alloc);
+    defer h.deinit();
+
+    const ws_cwd = try std.fs.path.join(alloc, &.{ h.dir, "agent-home" });
+    defer alloc.free(ws_cwd);
+    try std.fs.cwd().makePath(ws_cwd);
+    const abs = try std.fs.cwd().realpathAlloc(alloc, ws_cwd);
+    defer alloc.free(abs);
+
+    try h.runOk(&.{ "workspace", "create", "proj", "--cwd", abs });
+    try startDetachedWs(&h, "proj", "pwd1", &.{ "sh", "-c", "pwd; exec cat" });
+    const content = try waitPeekContainsWs(&h, "proj", "pwd1", abs);
+    defer alloc.free(content);
+}
+
+test "workspace create rejects invalid cwd" {
+    const alloc = std.testing.allocator;
+    var h = try Harness.init(alloc);
+    defer h.deinit();
+
+    const missing = try std.fs.path.join(alloc, &.{ h.dir, "missing-cwd" });
+    defer alloc.free(missing);
+    const result = try h.run(&.{ "workspace", "create", "proj", "--cwd", missing });
+    defer alloc.free(result.stdout);
+    defer alloc.free(result.stderr);
+    try std.testing.expect(result.term == .Exited and result.term.Exited == 2);
+    try std.testing.expect(std.mem.indexOf(u8, result.stderr, "cwd must be an existing directory") != null);
+}
+
+test "http api: create workspace with cwd" {
+    const alloc = std.testing.allocator;
+    var h = try Harness.init(alloc);
+    defer h.deinit();
+    var api = try ApiServer.start(&h, null);
+    defer api.deinit();
+
+    const ws_cwd = try std.fs.path.join(alloc, &.{ h.dir, "http-cwd" });
+    defer alloc.free(ws_cwd);
+    try std.fs.cwd().makePath(ws_cwd);
+    const abs = try std.fs.cwd().realpathAlloc(alloc, ws_cwd);
+    defer alloc.free(abs);
+
+    const body = try std.fmt.allocPrint(alloc, "{{\"cwd\":\"{s}\"}}", .{abs});
+    defer alloc.free(body);
+    const created = try api.request("POST", "/v1/workspaces/cwdws", body, null);
+    defer created.deinit(alloc);
+    try expectStatus(created, 201);
+    try expectBodyContains(created, "\"cwd\":");
+    try expectBodyContains(created, abs);
+
+    const listed = try api.request("GET", "/v1/workspaces", "", null);
+    defer listed.deinit(alloc);
+    try expectStatus(listed, 200);
+    try expectBodyContains(listed, "\"workspace\":\"cwdws\"");
+    try expectBodyContains(listed, abs);
+}
+
 // -- moo ui -------------------------------------------------------------------
 
 fn runLsJson(

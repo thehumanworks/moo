@@ -27,6 +27,8 @@ pub const Options = struct {
     /// Extra environment variables (key, value) applied to the child before
     /// exec, e.g. an agent harness's per-session CODEX_HOME. Default: none.
     env_overrides: []const [2][]const u8 = &.{},
+    /// Working directory for the session child. Default: inherit from parent.
+    cwd: ?[]const u8 = null,
     rows: u16 = 24,
     cols: u16 = 80,
 };
@@ -110,7 +112,15 @@ pub const Daemon = struct {
             .flags = 0,
         }, null);
 
-        self.win = try createWindow(self.alloc, opts.name, opts.argv, opts.env_overrides, self.rows, self.cols);
+        self.win = try createWindow(
+            self.alloc,
+            opts.name,
+            opts.argv,
+            opts.env_overrides,
+            opts.cwd,
+            self.rows,
+            self.cols,
+        );
 
         try self.loop();
     }
@@ -650,6 +660,7 @@ pub const Daemon = struct {
         session_name: []const u8,
         argv: []const []const u8,
         env_overrides: []const [2][]const u8,
+        cwd: ?[]const u8,
         rows: u16,
         cols: u16,
     ) !*Window {
@@ -664,7 +675,7 @@ pub const Daemon = struct {
         var default_argv: [1][]const u8 = .{env.get("SHELL") orelse "/bin/sh"};
         const child_argv: []const []const u8 = if (argv.len > 0) argv else &default_argv;
 
-        return Window.create(alloc, child_argv, &env, rows, cols);
+        return Window.create(alloc, child_argv, &env, rows, cols, cwd);
     }
 
     fn liveWindow(self: *Daemon) ?*Window {

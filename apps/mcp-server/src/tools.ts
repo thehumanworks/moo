@@ -47,9 +47,11 @@ export function registerMooTools(server: McpServer, client: MooApiClient): void 
     {
       title: "Create Moo Workspace",
       description: "Create a moo workspace without creating a session.",
-      inputSchema: requiredWorkspaceSchema,
+      inputSchema: requiredWorkspaceSchema.extend({
+        cwd: z.string().optional().describe("Working directory for all sessions in this workspace"),
+      }),
     },
-    async ({ workspace }) => result(await client.request("POST", workspacePath(workspace))),
+    async ({ workspace, cwd }) => result(await client.request("POST", workspacePath(workspace), compact({ cwd }))),
   );
 
   server.registerTool(

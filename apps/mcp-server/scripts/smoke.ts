@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -16,6 +16,7 @@ const repoRoot = new URL("../../..", import.meta.url).pathname;
 const mooBin = join(repoRoot, "zig-out", "bin", "moo");
 const runtimeDir = await mkdtemp(join(tmpdir(), "moo-mcp-smoke-"));
 await mkdir(runtimeDir, { recursive: true });
+const runtimeDirAbs = await realpath(runtimeDir);
 
 const child = spawn(mooBin, ["mcp"], {
   cwd: repoRoot,
@@ -67,16 +68,23 @@ try {
     throw new Error(`unexpected health result: ${JSON.stringify(health)}`);
   }
 
-  send(4, "tools/call", { name: "moo_create_workspace", arguments: { workspace: "smoke" } });
-  const created = await expectResult(reader, 4) as { structuredContent?: { workspace?: string } };
+  send(4, "tools/call", { name: "moo_create_workspace", arguments: { workspace: "smoke", cwd: runtimeDirAbs } });
+  const created = await expectResult(reader, 4) as { structuredContent?: { workspace?: string; cwd?: string } };
   if (created.structuredContent?.workspace !== "smoke") {
     throw new Error(`unexpected create result: ${JSON.stringify(created)}`);
   }
+  if (created.structuredContent?.cwd !== runtimeDirAbs) {
+    throw new Error(`unexpected create cwd: ${JSON.stringify(created)}`);
+  }
 
   send(5, "tools/call", { name: "moo_list_workspaces", arguments: {} });
-  const workspaces = await expectResult(reader, 5) as { structuredContent?: { workspaces?: Array<{ workspace?: string }> } };
-  if (!workspaces.structuredContent?.workspaces?.some((workspace) => workspace.workspace === "smoke")) {
+  const workspaces = await expectResult(reader, 5) as { structuredContent?: { workspaces?: Array<{ workspace?: string; cwd?: string }> } };
+  const smoke = workspaces.structuredContent?.workspaces?.find((workspace) => workspace.workspace === "smoke");
+  if (!smoke) {
     throw new Error(`workspace missing from list result: ${JSON.stringify(workspaces)}`);
+  }
+  if (smoke.cwd !== runtimeDirAbs) {
+    throw new Error(`unexpected listed cwd: ${JSON.stringify(smoke)}`);
   }
 
   send(6, "tools/call", { name: "moo_remove_workspace", arguments: { workspace: "smoke" } });
