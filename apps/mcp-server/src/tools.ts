@@ -151,6 +151,22 @@ export function registerMooTools(server: McpServer, client: MooApiClient): void 
   );
 
   server.registerTool(
+    "moo_send_slash_command",
+    {
+      title: "Send Slash Command To Moo Session",
+      description: "Send an agent harness slash command (/compact, /clear, /goal) to a moo session. Enter is appended automatically.",
+      inputSchema: sessionSchema.extend({
+        command: z.enum(["compact", "clear", "goal"]),
+        prompt: z.string().optional(),
+        clear: z.boolean().optional(),
+      }),
+    },
+    async ({ workspace, session, ...body }) => result(
+      await client.request("POST", `${sessionPath(workspace, session)}/slash`, body),
+    ),
+  );
+
+  server.registerTool(
     "moo_get_screen",
     {
       title: "Get Moo Screen",

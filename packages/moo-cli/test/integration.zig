@@ -1189,6 +1189,7 @@ test "help: overview, command pages, topics, and version" {
     try std.testing.expect(overview.term.Exited == 0);
     try std.testing.expect(std.mem.indexOf(u8, overview.stdout, "commands:") != null);
     try std.testing.expect(std.mem.indexOf(u8, overview.stdout, "kill") != null);
+    try std.testing.expect(std.mem.indexOf(u8, overview.stdout, "slash") != null);
     try std.testing.expect(std.mem.indexOf(u8, overview.stdout, "mcp") != null);
     try std.testing.expect(std.mem.indexOf(u8, overview.stdout, "attach, at, a <name>") != null);
 
@@ -1203,6 +1204,12 @@ test "help: overview, command pages, topics, and version" {
     try std.testing.expect(send_page.term.Exited == 0);
     try std.testing.expect(std.mem.indexOf(u8, send_page.stdout, "--no-enter") != null);
     try std.testing.expect(std.mem.indexOf(u8, send_page.stdout, "--key") != null);
+
+    const slash_page = try h.run(&.{ "help", "slash" });
+    defer alloc.free(slash_page.stdout);
+    defer alloc.free(slash_page.stderr);
+    try std.testing.expect(slash_page.term.Exited == 0);
+    try std.testing.expect(std.mem.indexOf(u8, slash_page.stdout, "/goal clear") != null);
 
     const automation = try h.run(&.{ "help", "automation" });
     defer alloc.free(automation.stdout);
@@ -1291,6 +1298,40 @@ test "send --key presses named keys" {
     try h.runOk(&.{ "send", "keys", "--key", "Enter" });
     const content = try h.waitPeekContains("keys", "key-mark");
     defer alloc.free(content);
+}
+
+test "slash sends harness commands with enter" {
+    const alloc = std.testing.allocator;
+    var h = try Harness.init(alloc);
+    defer h.deinit();
+
+    try h.startDetached("sl", &.{"cat"});
+    try h.runOk(&.{ "slash", "sl", "clear" });
+    {
+        const content = try h.waitPeekContains("sl", "/clear");
+        defer alloc.free(content);
+    }
+
+    try h.runOk(&.{ "slash", "sl", "compact", "--prompt", "focus on tests" });
+    {
+        const content = try h.waitPeekContains("sl", "/compact focus on tests");
+        defer alloc.free(content);
+    }
+
+    try h.runOk(&.{ "slash", "sl", "goal", "--prompt", "ship slash" });
+    {
+        const content = try h.waitPeekContains("sl", "/goal ship slash");
+        defer alloc.free(content);
+    }
+
+    try h.runOk(&.{ "slash", "sl", "goal", "--clear" });
+    {
+        const content = try h.waitPeekContains("sl", "/goal clear");
+        defer alloc.free(content);
+    }
+
+    try h.runExit(&.{ "slash", "sl", "goal" }, 2);
+    try h.runExit(&.{ "slash", "sl", "clear", "--prompt", "nope" }, 2);
 }
 
 test "wait --text and --idle observe session output" {
@@ -2035,6 +2076,76 @@ test "http api: drive wait screen" {
     try attached.send("\x01d");
     try attached.waitFor("detached from drv");
     try std.testing.expectEqual(@as(u32, 0), try attached.waitExit());
+}
+
+test "http api: slash commands" {
+    const alloc = std.testing.allocator;
+    var h = try Harness.init(alloc);
+    defer h.deinit();
+    var api = try ApiServer.start(&h, null);
+    defer api.deinit();
+
+    const created = try api.request(
+        "POST",
+        "/v1/workspaces/@default/sessions",
+        "{\"name\":\"slashapi\",\"command\":[\"cat\"]}",
+        null,
+    );
+    defer created.deinit(alloc);
+    try expectStatus(created, 201);
+    try h.waitSessionUp("slashapi");
+
+    const cleared = try api.request(
+        "POST",
+        "/v1/workspaces/@default/sessions/slashapi/slash",
+        "{\"command\":\"clear\"}",
+        null,
+    );
+    defer cleared.deinit(alloc);
+    try expectStatus(cleared, 200);
+    try expectBodyContains(cleared, "\"line\":\"/clear\"");
+    {
+        const content = try h.waitPeekContains("slashapi", "/clear");
+        defer alloc.free(content);
+    }
+
+    const goal = try api.request(
+        "POST",
+        "/v1/workspaces/@default/sessions/slashapi/slash",
+        "{\"command\":\"goal\",\"prompt\":\"http slash goal\"}",
+        null,
+    );
+    defer goal.deinit(alloc);
+    try expectStatus(goal, 200);
+    try expectBodyContains(goal, "\"line\":\"/goal http slash goal\"");
+    {
+        const content = try h.waitPeekContains("slashapi", "/goal http slash goal");
+        defer alloc.free(content);
+    }
+
+    const goal_clear = try api.request(
+        "POST",
+        "/v1/workspaces/@default/sessions/slashapi/slash",
+        "{\"command\":\"goal\",\"clear\":true}",
+        null,
+    );
+    defer goal_clear.deinit(alloc);
+    try expectStatus(goal_clear, 200);
+    try expectBodyContains(goal_clear, "\"line\":\"/goal clear\"");
+    {
+        const content = try h.waitPeekContains("slashapi", "/goal clear");
+        defer alloc.free(content);
+    }
+
+    const bad = try api.request(
+        "POST",
+        "/v1/workspaces/@default/sessions/slashapi/slash",
+        "{\"command\":\"goal\"}",
+        null,
+    );
+    defer bad.deinit(alloc);
+    try expectStatus(bad, 400);
+    try expectBodyContains(bad, "\"code\":\"bad_slash\"");
 }
 
 test "http api: agent transcript" {
