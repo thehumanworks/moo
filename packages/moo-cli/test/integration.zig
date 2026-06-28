@@ -4763,7 +4763,7 @@ test "ui: wheel scrolls again after a session resets the terminal" {
     var h = try Harness.init(alloc);
     defer h.deinit();
 
-    try h.startDetached("rst", &.{"bash"});
+    try h.startDetached("rst", &.{ "bash", "--norc" });
 
     var ui = try PtyClient.spawn(&h, &.{"ui"}, 24, 100);
     defer ui.deinit();

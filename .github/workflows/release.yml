@@ -7,43 +7,29 @@ on:
 permissions:
   contents: write
 
-# mlugg/setup-zig still declares node20, which GitHub runners are
-# deprecating; force Node 24 ahead of the switchover.
-env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-
 jobs:
   release:
     name: build and publish
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-      - uses: mlugg/setup-zig@v2
-        with:
-          version: 0.15.2
-      - uses: oven-sh/setup-bun@v2
-      - run: bun install --frozen-lockfile
+      - uses: jdx/mise-action@v4
+      - run: mise run mcp-deps
       - name: Check tag matches project version
         run: |
           version="${GITHUB_REF_NAME#v}"
           grep -Fq ".version = \"$version\"" build.zig.zon
           grep -Fq "pub const version = \"$version\"" packages/moo-cli/src/main.zig
           grep -Fq "\"version\": \"$version\"" apps/mcp-server/package.json
-      - name: Fetch dependencies (with retry)
-        run: |
-          for i in 1 2 3 4 5; do
-            zig build --fetch=all && exit 0
-            echo "fetch attempt $i failed; retrying in 10s" >&2
-            sleep 10
-          done
-          exit 1
+      - name: Fetch dependencies
+        run: mise run fetch
       - name: Test the Linux release binary
-        run: zig build test-all -Dtarget=x86_64-linux-musl -Doptimize=ReleaseSafe --summary all
+        run: mise run test-all -- -Dtarget=x86_64-linux-musl -Doptimize=ReleaseSafe --summary all
       - name: Build release binaries
         run: |
           mkdir -p dist
           for target in x86_64-linux-musl aarch64-linux-musl x86_64-macos aarch64-macos; do
-            zig build -Dtarget="$target" -Doptimize=ReleaseSafe -p "zig-out/$target"
+            mise run zig -- build -Dtarget="$target" -Doptimize=ReleaseSafe -p "zig-out/$target"
             asset="moo-${target%-musl}"
             tar -czf "dist/$asset.tar.gz" -C "zig-out/$target/bin" moo moo-mcp-server
           done

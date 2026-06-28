@@ -224,24 +224,25 @@ One session per task, with `moo ui` to juggle them.
 
 ## Contributing
 
-Requires Zig 0.15.2.
+Requires `mise`; the repository pins Zig 0.15.2 and Bun in `mise.toml`.
+On macOS, `mise bootstrap` installs the Homebrew `zig@0.15` package used by
+the repo-local Zig task when the mise-managed Zig binary cannot link against
+the active macOS SDK.
 
 ```sh
-```sh
-bun install --frozen-lockfile   # TypeScript workspace dependencies
-zig build                       # zig-out/bin/moo and moo-mcp-server
-zig build test                  # unit tests
-zig build test-integration      # end-to-end tests on a real PTY
-zig build test-all              # everything
+mise bootstrap                  # install bootstrap packages, when needed
+mise install                    # install pinned mise tools
+mise run build-debug            # zig-out/bin/moo and moo-mcp-server
+mise run test                   # unit tests
+mise run test-integration       # end-to-end tests on a real PTY
+mise run test-all               # everything
+mise run check                  # format, MCP checks, build, and tests
 ```
 
 The repository is a small monorepo: the Zig CLI lives under
 `packages/moo-cli`, and the TypeScript MCP server lives under
 `apps/mcp-server`. The libghostty dependency is fetched and built from source
 automatically (pinned in `build.zig.zon`).
-
-With Nix, `nix develop` opens a shell with the right Zig and Bun versions, and
-`nix build` builds the package to `./result/bin/moo`.
 
 ## Architecture
 

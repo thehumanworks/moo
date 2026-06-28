@@ -54,17 +54,17 @@ Tick a `DoD-N` box only when its own `verify by:` has been run and passed (not m
 because a closing Task is ticked). Log the command and its outcome as an Evidence bullet
 under the Task that **Closes:** it. DONE requires every DoD box ticked.
 
-- [x] **DoD-1** — Running `moo ui` remains the normal user entrypoint; no new command, wrapper, or manual `moo attach` step is required to open or resume the UI. — *verify by:* `just test-all`, including existing UI startup tests plus a new reconnect test that invokes `moo ui` for both first attach and resume.
-- [x] **DoD-2** — Existing `moo ui` interaction is preserved for the main surface: every pre-existing `ui:` integration test still passes after the manager/viewer split. — *verify by:* `just test-all`, including all existing `ui:` integration tests.
-- [x] **DoD-3** — An ungraceful PTY EOF while `moo ui` is open leaves the focused session attached by the same persistent UI manager instead of detaching it. — *verify by:* `just test-all`, including a real-PTY test that closes the viewer PTY without sending `C-a d`, waits for the first viewer to exit, records the manager identity before and after, and asserts `moo ls --json` reports the previously focused session as attached.
-- [x] **DoD-4** — An ungraceful `SIGHUP`/SSH-loss style viewer death while `moo ui` is open leaves the focused session attached by the same persistent UI manager instead of detaching it. — *verify by:* `just test-all`, including a real-PTY test that sends `SIGHUP` or closes the controlling process group without sending `C-a d`, waits for the first viewer to exit, records the manager identity before and after, and asserts `moo ls --json` reports the previously focused session as attached.
-- [x] **DoD-5** — Re-running `moo ui` after ungraceful viewer loss reconnects to the same manager and repaints a deliberately non-default focused session without requiring session selection or `moo attach <name>`. — *verify by:* `just test-all`, including a real-PTY reconnect test with at least two sessions where the focused session is not the one a fresh UI startup would auto-select, and the same manager identity handles reconnect.
-- [x] **DoD-6** — Input typed after reconnect is delivered to the previously focused non-default session. — *verify by:* `just test-all`, including a reconnect test that types a unique marker after the second `moo ui` starts and verifies it appears only in `moo peek` output for that named focused session.
-- [x] **DoD-7** — Deliberate `C-a d` from `moo ui` preserves current close semantics: the viewer exits cleanly, terminal restore and close notice behave as before, and the focused session is not left attached solely to keep a resumable manager alive. — *verify by:* `just test-all`, including the existing `ui: quit with C-a d leaves sessions running and restores the terminal` test plus an assertion that `moo ls --json` reports the focused session detached after deliberate quit.
-- [x] **DoD-8** — A second `moo ui` viewer steals the UI surface cleanly from the first viewer; the manager identity and focused session remain alive. — *verify by:* `just test-all`, including a real-PTY test with two concurrent `moo ui` clients where the first receives a clean detach/stolen outcome and the second can type into the focused session.
-- [x] **DoD-9** — UI manager sockets are workspace-scoped: default `moo ui`, `moo ui -w proj`, and `MOO_WORKSPACE=proj moo ui` do not share managers or focused-session state across workspace dirs. — *verify by:* `just test-all`, including concurrent workspace reconnect tests with same-named sessions or distinct focus markers proving each entrypoint resumes only its own manager.
-- [x] **DoD-10** — Stale UI manager sockets do not wedge startup and do not cause ordinary session sockets to be deleted. — *verify by:* `just test-all`, including tests for connection-refused stale socket, EOF/short handshake, malformed manager response, and preservation of normal `<session>.sock` files.
-- [x] **DoD-11** — No persistent UI manager is left running forever after its workspace has no sessions and no viewer. — *verify by:* `just test-all`, including a cleanup test that records manager identity, kills all sessions in a workspace, detaches the viewer, and asserts the old manager exits or its socket is removed/refuses before a later `moo ui` starts from a fresh empty state.
+- [x] **DoD-1** — Running `moo ui` remains the normal user entrypoint; no new command, wrapper, or manual `moo attach` step is required to open or resume the UI. — *verify by:* `mise run test-all`, including existing UI startup tests plus a new reconnect test that invokes `moo ui` for both first attach and resume.
+- [x] **DoD-2** — Existing `moo ui` interaction is preserved for the main surface: every pre-existing `ui:` integration test still passes after the manager/viewer split. — *verify by:* `mise run test-all`, including all existing `ui:` integration tests.
+- [x] **DoD-3** — An ungraceful PTY EOF while `moo ui` is open leaves the focused session attached by the same persistent UI manager instead of detaching it. — *verify by:* `mise run test-all`, including a real-PTY test that closes the viewer PTY without sending `C-a d`, waits for the first viewer to exit, records the manager identity before and after, and asserts `moo ls --json` reports the previously focused session as attached.
+- [x] **DoD-4** — An ungraceful `SIGHUP`/SSH-loss style viewer death while `moo ui` is open leaves the focused session attached by the same persistent UI manager instead of detaching it. — *verify by:* `mise run test-all`, including a real-PTY test that sends `SIGHUP` or closes the controlling process group without sending `C-a d`, waits for the first viewer to exit, records the manager identity before and after, and asserts `moo ls --json` reports the previously focused session as attached.
+- [x] **DoD-5** — Re-running `moo ui` after ungraceful viewer loss reconnects to the same manager and repaints a deliberately non-default focused session without requiring session selection or `moo attach <name>`. — *verify by:* `mise run test-all`, including a real-PTY reconnect test with at least two sessions where the focused session is not the one a fresh UI startup would auto-select, and the same manager identity handles reconnect.
+- [x] **DoD-6** — Input typed after reconnect is delivered to the previously focused non-default session. — *verify by:* `mise run test-all`, including a reconnect test that types a unique marker after the second `moo ui` starts and verifies it appears only in `moo peek` output for that named focused session.
+- [x] **DoD-7** — Deliberate `C-a d` from `moo ui` preserves current close semantics: the viewer exits cleanly, terminal restore and close notice behave as before, and the focused session is not left attached solely to keep a resumable manager alive. — *verify by:* `mise run test-all`, including the existing `ui: quit with C-a d leaves sessions running and restores the terminal` test plus an assertion that `moo ls --json` reports the focused session detached after deliberate quit.
+- [x] **DoD-8** — A second `moo ui` viewer steals the UI surface cleanly from the first viewer; the manager identity and focused session remain alive. — *verify by:* `mise run test-all`, including a real-PTY test with two concurrent `moo ui` clients where the first receives a clean detach/stolen outcome and the second can type into the focused session.
+- [x] **DoD-9** — UI manager sockets are workspace-scoped: default `moo ui`, `moo ui -w proj`, and `MOO_WORKSPACE=proj moo ui` do not share managers or focused-session state across workspace dirs. — *verify by:* `mise run test-all`, including concurrent workspace reconnect tests with same-named sessions or distinct focus markers proving each entrypoint resumes only its own manager.
+- [x] **DoD-10** — Stale UI manager sockets do not wedge startup and do not cause ordinary session sockets to be deleted. — *verify by:* `mise run test-all`, including tests for connection-refused stale socket, EOF/short handshake, malformed manager response, and preservation of normal `<session>.sock` files.
+- [x] **DoD-11** — No persistent UI manager is left running forever after its workspace has no sessions and no viewer. — *verify by:* `mise run test-all`, including a cleanup test that records manager identity, kills all sessions in a workspace, detaches the viewer, and asserts the old manager exits or its socket is removed/refuses before a later `moo ui` starts from a fresh empty state.
 
 ---
 
@@ -74,7 +74,7 @@ The goal terminates when **any** condition holds. On exit, state which fired —
 explicitly — in the response to the user.
 
 - **`DONE`** — all §3 items ticked and all §5 tasks ≥ confidence floor. *(primary)*
-- **`BLOCKED-DEP`** — Zig 0.15.2 / the pinned Nix development shell, the macOS SDK/linker environment, or the real-PTY integration harness is unavailable after one direct retry. Exit without the blocked step; name it explicitly.
+- **`BLOCKED-DEP`** — Zig 0.15.2 / the mise-pinned development toolchain, the macOS SDK/linker environment, or the real-PTY integration harness is unavailable after one direct retry. Exit without the blocked step; name it explicitly.
 - **`SCOPE-CHANGE`** — work cannot complete without changing the user-facing `moo ui` entrypoint, requiring a wrapper command, or changing deliberate `C-a d` close semantics. Record the proposal in §6 and exit to the user.
 - **`CONFIDENCE-STALL`** — a task cannot reach the floor after two focused implementation attempts. Exit, report the task and the gap.
 - **`BUDGET`** — three implementation passes are exhausted without a passing ungraceful-disconnect reconnect integration test. Exit and report progress.
@@ -101,14 +101,14 @@ trailing `[x]` only when the Verification Contract passes and Confidence ≥ flo
 
 **Verification Contract**
 - *Check:* The new tests fail against current code because `moo ui` exits and releases focused UI state on TTY loss, not because of harness timing or unrelated setup.
-- *Method:* `nix develop --command zig build test-integration --summary all`
+- *Method:* `mise run test-integration -- --summary all`
 - *Expected:* Non-zero exit before implementation, with at least the reconnect test failing on detached/no-manager behavior.
 - *BDD scenarios covered:* Given `moo ui` is open on a deliberately non-default focused session, when the phone/SSH PTY disappears without `C-a d`, then the same UI manager remains and a later `moo ui` resumes the same focused session. Given deliberate `C-a d`, then current close semantics are preserved. Given two viewers, then one surface is active and the manager survives.
 
 **Confidence:** 95 / 90 · **Depends on:** none · **Closes:** none
 
 **Evidence (required before tick; append-only)**
-- 2026-06-17 — `nix develop --command zig build test-integration -Dtest-filter="ui manager: PTY EOF reconnect resumes same non-default focus" --summary all` in throwaway `/tmp/moo-redtest` with only test/build-harness diff applied to `HEAD` — exit 1 as expected; `0/1` passed; failed on `timeout: ui manager id never appeared`, proving old `moo ui` had no persistent UI manager.
+- 2026-06-17 — `mise run test-integration -- -Dtest-filter="ui manager: PTY EOF reconnect resumes same non-default focus" --summary all` in throwaway `/tmp/moo-redtest` with only test/build-harness diff applied to `HEAD` — exit 1 as expected; `0/1` passed; failed on `timeout: ui manager id never appeared`, proving old `moo ui` had no persistent UI manager.
 
 ---
 
@@ -123,14 +123,14 @@ trailing `[x]` only when the Verification Contract passes and Confidence ≥ flo
 
 **Verification Contract**
 - *Check:* `moo ui` can start, reconnect, and recover from stale manager sockets without changing per-session daemon behavior.
-- *Method:* `nix develop --command zig build test-integration --summary all`
+- *Method:* `mise run test-integration -- --summary all`
 - *Expected:* Exit 0 for startup, stale socket, and session attach/detach tests that do not exercise viewer transport details.
 - *BDD scenarios covered:* Given no UI manager socket exists, `moo ui` starts one. Given a stale UI manager socket exists, `moo ui` removes or replaces it. Given a session daemon socket exists, manager socket cleanup does not delete it.
 
 **Confidence:** 95 / 90 · **Depends on:** T1 · **Closes:** DoD-1, DoD-9, DoD-10
 
 **Evidence (required before tick; append-only)**
-- 2026-06-17 — `nix develop --command zig build test-integration --summary all` — exit 0; `99/99` integration tests passed, including first `moo ui` attach/resume via the same entrypoint, workspace manager isolation, and refused/EOF/malformed/silent stale UI socket recovery without deleting normal session sockets.
+- 2026-06-17 — `mise run test-integration -- --summary all` — exit 0; `99/99` integration tests passed, including first `moo ui` attach/resume via the same entrypoint, workspace manager isolation, and refused/EOF/malformed/silent stale UI socket recovery without deleting normal session sockets.
 
 ---
 
@@ -145,14 +145,14 @@ trailing `[x]` only when the Verification Contract passes and Confidence ≥ flo
 
 **Verification Contract**
 - *Check:* Existing UI behavior still passes with the manager/viewer split, and the focused session remains attached when the viewer disappears.
-- *Method:* `nix develop --command zig build test-integration --summary all`
+- *Method:* `mise run test-integration -- --summary all`
 - *Expected:* Exit 0 for all pre-existing `ui:` tests plus the ungraceful-disconnect attachment assertion.
 - *BDD scenarios covered:* Given `moo ui` is used normally, the visible UI behaves as before. Given the viewer disappears, the manager keeps the focused session view attached. Given session output arrives while no viewer is attached, reconnect repaints from current state.
 
 **Confidence:** 95 / 90 · **Depends on:** T2 · **Closes:** DoD-2, DoD-3, DoD-4
 
 **Evidence (required before tick; append-only)**
-- 2026-06-17 — `nix develop --command zig build test-integration --summary all` — exit 0; `99/99` integration tests passed, including all pre-existing `ui:` tests plus new PTY EOF and `SIGHUP` reconnect tests that assert the focused session stays attached through viewer loss.
+- 2026-06-17 — `mise run test-integration -- --summary all` — exit 0; `99/99` integration tests passed, including all pre-existing `ui:` tests plus new PTY EOF and `SIGHUP` reconnect tests that assert the focused session stays attached through viewer loss.
 
 ---
 
@@ -167,14 +167,14 @@ trailing `[x]` only when the Verification Contract passes and Confidence ≥ flo
 
 **Verification Contract**
 - *Check:* Reconnect after TTY drop, deliberate `C-a d` quit semantics, second-viewer steal, and post-reconnect input all pass against real PTYs.
-- *Method:* `nix develop --command zig build test-integration --summary all`
+- *Method:* `mise run test-integration -- --summary all`
 - *Expected:* Exit 0 for reconnect-focused integration tests.
 - *BDD scenarios covered:* Given an ungraceful phone drop, a later `moo ui` resumes the same focused session. Given deliberate `C-a d`, the UI closes as before and does not leave a hidden attachment behind. Given two viewers, the newer viewer controls the surface and the older one exits cleanly. Given input after reconnect, it reaches the same session.
 
 **Confidence:** 95 / 90 · **Depends on:** T3 · **Closes:** DoD-5, DoD-6, DoD-7, DoD-8
 
 **Evidence (required before tick; append-only)**
-- 2026-06-17 — `nix develop --command zig build test-integration --summary all` — exit 0; `99/99` integration tests passed, including non-default focus repaint after reconnect, gap output while no viewer was attached, post-reconnect input delivered only to the previously focused session, deliberate `C-a d` detaching the session, and second-viewer steal.
+- 2026-06-17 — `mise run test-integration -- --summary all` — exit 0; `99/99` integration tests passed, including non-default focus repaint after reconnect, gap output while no viewer was attached, post-reconnect input delivered only to the previously focused session, deliberate `C-a d` detaching the session, and second-viewer steal.
 
 ---
 
@@ -189,14 +189,14 @@ trailing `[x]` only when the Verification Contract passes and Confidence ≥ flo
 
 **Verification Contract**
 - *Check:* Workspace managers are isolated, do not appear as user sessions, and do not persist indefinitely after workspace teardown.
-- *Method:* `nix develop --command zig build test-integration --summary all`
+- *Method:* `mise run test-integration -- --summary all`
 - *Expected:* Exit 0 for workspace reconnect and cleanup tests; `moo ls` output includes only user sessions and no old manager identity survives after cleanup.
 - *BDD scenarios covered:* Given default and `proj` UIs both exist, reconnecting each returns to its own focus state. Given all sessions in `proj` are killed and the viewer detaches, the `proj` manager exits or is cleaned so the next UI starts from empty state.
 
 **Confidence:** 95 / 90 · **Depends on:** T4 · **Closes:** DoD-9, DoD-11
 
 **Evidence (required before tick; append-only)**
-- 2026-06-17 — `nix develop --command zig build test-integration --summary all` — exit 0; `99/99` integration tests passed, including default vs `-w proj` vs `MOO_WORKSPACE=proj` manager identity/focus isolation and cleanup after the last session/viewer is gone.
+- 2026-06-17 — `mise run test-integration -- --summary all` — exit 0; `99/99` integration tests passed, including default vs `-w proj` vs `MOO_WORKSPACE=proj` manager identity/focus isolation and cleanup after the last session/viewer is gone.
 
 ---
 
@@ -205,25 +205,25 @@ trailing `[x]` only when the Verification Contract passes and Confidence ≥ flo
 **Steps**
 - [x] Update help/README only where the reconnect behavior or manager lifecycle needs user-visible documentation; do not require a new daily workflow.
 - [x] Run formatting and unit tests.
-- [x] Run the full PTY integration suite in the pinned Zig/Nix environment.
+- [x] Run the full PTY integration suite in the pinned Zig/mise environment.
 - [x] Inspect `git diff --stat` and keep the diff limited to UI manager, protocol/path helpers, tests, and focused docs.
 - [x] Get an independent completion review against the DoD and logged evidence before marking DONE.
 
 **Verification Contract**
 - *Check:* Full validation passes and documentation matches the no-UX-change product contract.
-- *Method:* `just check-release`
+- *Method:* `mise run check-release`
 - *Expected:* Exit 0; docs mention reconnect behavior without telling users to run a wrapper or manual attach step.
 - *BDD scenarios covered:* Regression sweep for normal attach, normal UI use, reconnect after phone drop, workspace scope, and cleanup.
 
 **Confidence:** 95 / 90 · **Depends on:** T5 · **Closes:** DoD-1, DoD-2, DoD-3, DoD-4, DoD-5, DoD-6, DoD-7, DoD-8, DoD-9, DoD-10, DoD-11
 
 **Evidence (required before tick; append-only)**
-- 2026-06-17 — `just fmt-check` — exit 0.
-- 2026-06-17 — `nix develop --command zig build test --summary all` — exit 0; `162/162` unit tests passed.
-- 2026-06-17 — `nix develop --command zig build test-integration --summary all` — exit 0; `99/99` integration tests passed.
-- 2026-06-17 — `nix develop --command zig build test-all -Doptimize=ReleaseSafe --summary all` — exit 0; `261/261` tests passed (`162` unit, `99` integration).
-- 2026-06-17 — `just check-release` — exit 0 after the final stale-handshake fix.
-- 2026-06-17 — Final independent QA subagent review — verdict `pass`, findings empty; reviewer also ran `git diff --check` and `just check-release` successfully.
+- 2026-06-17 — `mise run fmt-check` — exit 0.
+- 2026-06-17 — `mise run test -- --summary all` — exit 0; `162/162` unit tests passed.
+- 2026-06-17 — `mise run test-integration -- --summary all` — exit 0; `99/99` integration tests passed.
+- 2026-06-17 — `mise run test-all -- -Doptimize=ReleaseSafe --summary all` — exit 0; `261/261` tests passed (`162` unit, `99` integration).
+- 2026-06-17 — `mise run check-release` — exit 0 after the final stale-handshake fix.
+- 2026-06-17 — Final independent QA subagent review — verdict `pass`, findings empty; reviewer also ran `git diff --check` and `mise run check-release` successfully.
 - 2026-06-17 — `git diff --stat` — scoped to `README.md`, `build.zig`, `src/help.zig`, `src/main.zig`, `src/paths.zig`, `src/ui.zig`, and `test/integration.zig`; no unrelated source files.
 
 ---

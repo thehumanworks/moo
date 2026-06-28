@@ -40,7 +40,7 @@ convention) is the whole point; the rejected soft-label alternative is in `PLAN.
 
 | ID | Outcome | Status |
 |----|---------|--------|
-| W0   | `just check` gate recipes + proven-green baseline | ✅ done |
+| W0   | `mise run check` gate recipes + proven-green baseline | ✅ done |
 | W0.1 | Hermetic integration harness (clears leaked `MOO*`) | ✅ done |
 | W1   | `paths.socketDirFor` resolves `<base>/ws/<name>`; validates name | ✅ done |
 | W2   | `-w/--workspace` flag + `MOO_WORKSPACE` resolution across commands | ✅ done |
@@ -66,7 +66,7 @@ convention) is the whole point; the rejected soft-label alternative is in `PLAN.
 
 - W1–W5 each delivered through the full loop (test contract → implement → adversarial
   review by a different agent → QA), tracked in the harness task list.
-- `just check-release` green (fmt + build + unit + PTY integration under ReleaseSafe),
+- `mise run check-release` green (fmt + build + unit + PTY integration under ReleaseSafe),
   all 228+ tests passing, with the captured exit code as evidence.
 - W6 either delivered or explicitly deferred pending the decision below.
 - Nothing committed/pushed until the user asks (see HANDOFF.md commit policy).
@@ -83,4 +83,4 @@ per-entry workspace dirs + sidebar row-index/mouse math); W1–W5 + W7 shipped w
 - Do not change unnamed-session behaviour. Backward compatibility is a hard requirement.
 - Workspace names reuse `paths.validateName` (same safe charset).
 - No new cross-cutting "filter" dimension — isolation comes from the directory.
-- Zig 0.15.2 via `nix develop` only (host Zig 0.16 is rejected). Use the `just` recipes.
+- Zig 0.15.2 via `mise` only (host Zig 0.16 is rejected). Use the `mise run` recipes.

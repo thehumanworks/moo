@@ -5,21 +5,14 @@ on:
     branches: [main]
   pull_request:
 
-# mlugg/setup-zig still declares node20, which GitHub runners are
-# deprecating; force Node 24 ahead of the switchover.
-env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-
 jobs:
   fmt:
     name: zig fmt
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-      - uses: mlugg/setup-zig@v2
-        with:
-          version: 0.15.2
-      - run: zig fmt --check build.zig build.zig.zon packages/moo-cli/src packages/moo-cli/test packages/moo-cli/bench
+      - uses: jdx/mise-action@v4
+      - run: mise run fmt-check
 
   test:
     name: test (${{ matrix.os }})
@@ -30,56 +23,19 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v6
-      - uses: mlugg/setup-zig@v2
-        with:
-          version: 0.15.2
-      - uses: oven-sh/setup-bun@v2
-      - run: bun install --frozen-lockfile
-      - run: bun run typecheck
-      - run: bun run test:mcp
-      - name: Fetch dependencies (with retry)
-        run: |
-          for i in 1 2 3 4 5; do
-            zig build --fetch=all && exit 0
-            echo "fetch attempt $i failed; retrying in 10s" >&2
-            sleep 10
-          done
-          exit 1
-      - name: Build
-        run: zig build --summary all
-      - name: Unit tests
-        run: zig build test --summary all
-      - name: Integration tests (real PTY)
-        run: zig build test-integration --summary all
+      - uses: jdx/mise-action@v4
+      - run: mise run fetch
+      - run: mise run mcp-typecheck
+      - run: mise run mcp-test
+      - run: mise run build-debug -- --summary all
+      - run: mise run test -- --summary all
+      - run: mise run test-integration -- --summary all
 
   release-safe:
     name: test ReleaseSafe
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-      - uses: mlugg/setup-zig@v2
-        with:
-          version: 0.15.2
-      - uses: oven-sh/setup-bun@v2
-      - run: bun install --frozen-lockfile
-      - run: bun run typecheck
-      - run: bun run test:mcp
-      - name: Fetch dependencies (with retry)
-        run: |
-          for i in 1 2 3 4 5; do
-            zig build --fetch=all && exit 0
-            echo "fetch attempt $i failed; retrying in 10s" >&2
-            sleep 10
-          done
-          exit 1
-      - run: zig build test-all -Doptimize=ReleaseSafe --summary all
-
-  nix:
-    name: nix build
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-      - uses: DeterminateSystems/nix-installer-action@v22
-      - run: nix flake check
-      - run: nix build -L
-      - run: nix run . -- version
+      - uses: jdx/mise-action@v4
+      - run: mise run fetch
+      - run: mise run zig -- build test-all -Doptimize=ReleaseSafe --summary all

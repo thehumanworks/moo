@@ -120,7 +120,7 @@ Policy: this PRD + `docs/http-api.md` update
 
 1. Unit tests: embedded peek fixtures (empty, draft, menu, wrong agent)
 2. Ledger tests: text without enter → block slash; Enter clears
-3. `just test` + `just test-all` green
+3. `mise run test` + `mise run test-all` green
 4. Live MCP: claude session with `--no-enter` draft → `moo_send_slash_command` blocked; `--force` succeeds; empty prompt allows slash
 
 ## Success criteria

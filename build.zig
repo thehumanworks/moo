@@ -24,6 +24,9 @@ pub fn build(b: *std.Build) void {
     if (b.lazyDependency("ghostty", .{
         .target = target,
         .optimize = optimize,
+        // moo only needs ghostty-vt correctness; disabling SIMD avoids
+        // pulling Zig's C++ stdlib build path into local macOS builds.
+        .simd = false,
         // moo only consumes the ghostty-vt module, never ghostty's macOS
         // XCFramework. Building that artifact runs LibCInstallation.findNative,
         // which requires an Xcode/SDK setup that isn't always present (and
@@ -88,6 +91,9 @@ pub fn build(b: *std.Build) void {
     if (b.lazyDependency("ghostty", .{
         .target = target,
         .optimize = optimize,
+        // moo only needs ghostty-vt correctness; disabling SIMD avoids
+        // pulling Zig's C++ stdlib build path into local macOS builds.
+        .simd = false,
         // moo only consumes the ghostty-vt module, never ghostty's macOS
         // XCFramework. Building that artifact runs LibCInstallation.findNative,
         // which requires an Xcode/SDK setup that isn't always present (and
@@ -114,6 +120,9 @@ pub fn build(b: *std.Build) void {
     if (b.lazyDependency("ghostty", .{
         .target = target,
         .optimize = optimize,
+        // moo only needs ghostty-vt correctness; disabling SIMD avoids
+        // pulling Zig's C++ stdlib build path into local macOS builds.
+        .simd = false,
         // moo only consumes the ghostty-vt module, never ghostty's macOS
         // XCFramework. Building that artifact runs LibCInstallation.findNative,
         // which requires an Xcode/SDK setup that isn't always present (and

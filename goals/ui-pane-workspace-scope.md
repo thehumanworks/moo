@@ -50,13 +50,13 @@ Tick a `DoD-N` box only when its own `verify by:` has been run and passed (not m
 because a closing Task is ticked). Log the command and its outcome as an Evidence bullet
 under the Task that **Closes:** it. DONE requires every DoD box ticked.
 
-- [ ] **DoD-1** — A new pane created with `C-a c` from `moo ui -w proj` increases workspace `proj`'s live session count by exactly 1. — *verify by:* `just test-all`, including a named integration test such as `ui: create from -w workspace stays in that workspace`.
-- [ ] **DoD-2** — The same `moo ui -w proj` create action leaves the default workspace live session count unchanged. — *verify by:* `just test-all`, including `ui: create from -w workspace stays in that workspace` and before/after parsed count assertions.
-- [ ] **DoD-3** — The same `moo ui -w proj` create action leaves an unrelated named workspace live session count unchanged. — *verify by:* `just test-all`, including `ui: create from -w workspace stays in that workspace` and before/after parsed count assertions.
-- [ ] **DoD-4** — A new pane created with `C-a c` from `MOO_WORKSPACE=proj moo ui` increases workspace `proj`'s live session count by exactly 1. — *verify by:* `just test-all`, including a named integration test such as `ui: create from MOO_WORKSPACE stays in that workspace`.
-- [ ] **DoD-5** — The same `MOO_WORKSPACE=proj moo ui` create action leaves the default workspace live session count unchanged. — *verify by:* `just test-all`, including `ui: create from MOO_WORKSPACE stays in that workspace` and before/after parsed count assertions.
-- [ ] **DoD-6** — The same `MOO_WORKSPACE=proj moo ui` create action leaves an unrelated named workspace live session count unchanged. — *verify by:* `just test-all`, including `ui: create from MOO_WORKSPACE stays in that workspace` and before/after parsed count assertions.
-- [ ] **DoD-7** — `moo ui` with neither `-w` nor `MOO_WORKSPACE` keeps its existing create behavior in the current default workspace. — *verify by:* `just test-all`, including the existing `ui: create and kill sessions from the ui` coverage or an equivalent assertion that unscoped UI creation changes the default workspace count.
+- [ ] **DoD-1** — A new pane created with `C-a c` from `moo ui -w proj` increases workspace `proj`'s live session count by exactly 1. — *verify by:* `mise run test-all`, including a named integration test such as `ui: create from -w workspace stays in that workspace`.
+- [ ] **DoD-2** — The same `moo ui -w proj` create action leaves the default workspace live session count unchanged. — *verify by:* `mise run test-all`, including `ui: create from -w workspace stays in that workspace` and before/after parsed count assertions.
+- [ ] **DoD-3** — The same `moo ui -w proj` create action leaves an unrelated named workspace live session count unchanged. — *verify by:* `mise run test-all`, including `ui: create from -w workspace stays in that workspace` and before/after parsed count assertions.
+- [ ] **DoD-4** — A new pane created with `C-a c` from `MOO_WORKSPACE=proj moo ui` increases workspace `proj`'s live session count by exactly 1. — *verify by:* `mise run test-all`, including a named integration test such as `ui: create from MOO_WORKSPACE stays in that workspace`.
+- [ ] **DoD-5** — The same `MOO_WORKSPACE=proj moo ui` create action leaves the default workspace live session count unchanged. — *verify by:* `mise run test-all`, including `ui: create from MOO_WORKSPACE stays in that workspace` and before/after parsed count assertions.
+- [ ] **DoD-6** — The same `MOO_WORKSPACE=proj moo ui` create action leaves an unrelated named workspace live session count unchanged. — *verify by:* `mise run test-all`, including `ui: create from MOO_WORKSPACE stays in that workspace` and before/after parsed count assertions.
+- [ ] **DoD-7** — `moo ui` with neither `-w` nor `MOO_WORKSPACE` keeps its existing create behavior in the current default workspace. — *verify by:* `mise run test-all`, including the existing `ui: create and kill sessions from the ui` coverage or an equivalent assertion that unscoped UI creation changes the default workspace count.
 
 ---
 
@@ -66,7 +66,7 @@ The goal terminates when **any** condition holds. On exit, state which fired —
 explicitly — in the response to the user.
 
 - **`DONE`** — all §3 items ticked and all §5 tasks ≥ confidence floor. *(primary)*
-- **`BLOCKED-DEP`** — Zig 0.15.2 / the pinned Nix development shell or the PTY integration harness is unavailable after one direct retry. Exit without the blocked step; name it explicitly.
+- **`BLOCKED-DEP`** — Zig 0.15.2 / the mise-pinned development toolchain or the PTY integration harness is unavailable after one direct retry. Exit without the blocked step; name it explicitly.
 - **`SCOPE-CHANGE`** — work cannot complete without changing scope. Record the
   proposal in §6 and exit to the user.
 - **`CONFIDENCE-STALL`** — a task cannot reach the floor after two honest implementation attempts. Exit, report the task and the gap.
@@ -92,16 +92,16 @@ trailing `[ ]` only when the Verification Contract passes and Confidence ≥ flo
 
 **Verification Contract**
 - *Check:* The new test fails against the current implementation for the scoped-create bug, not due to harness setup or timing.
-- *Method:* `nix develop --command zig build test-integration --summary all`
+- *Method:* `mise run test-integration -- --summary all`
 - *Expected:* Non-zero exit before the implementation fix, with failure showing `proj` count did not increase or a non-target workspace count changed.
 - *BDD scenarios covered:* Given `moo ui -w proj` is open with no sessions in `proj`, when the user presses `C-a c`, then the new session must be created in `proj` and not in default. Given `MOO_WORKSPACE=proj moo ui` is open, when the user presses `C-a c`, then the new session must be created in `proj` and not in default. Given no workspace is scoped, when the user presses `C-a c`, then the new session must be created in default.
 
 **Confidence:** 75 / 90 · **Depends on:** none · **Closes:** none
 
 **Evidence (required before tick; append-only)**
-- 2026-06-17 — subagent red_tests in `/private/tmp/moo-ui-pane-scope-tests` added PTY `MOO_WORKSPACE` hermetic spawn support plus named `-w` and env-scoped UI create tests; `zig fmt --check test/integration.zig`, pinned Zig `fmt --check`, and pinned Zig `ast-check test/integration.zig` exited 0 in the worker copy; `nix develop --command zig build test-integration --summary all` was blocked by Nix daemon access and no red failure could be confirmed in this sandbox.
-- 2026-06-17 — merged test changes into main checkout; `/nix/store/gjsz3dnzp6xy8vyq8zi60cx2ps5mmxkh-zig-0.15.2/bin/zig ast-check test/integration.zig` exited 0.
-- 2026-06-17 — daemon-free pinned Zig validation now reaches integration runtime by copying `/nix/store/wd0v82d7917nfhkdyav1p5zd0y4236ar-boo-deps-0.5.20` to `ZIG_GLOBAL_CACHE_DIR=/private/tmp/moo-zig-global-cache`, setting `SDKROOT`/`DEVELOPER_DIR` to `/nix/store/rcqgjj8hphkhqark1ibiwfaa7yrzniz3-apple-sdk-14.4`, and running `zig build --search-prefix "$SDK/usr" test-integration --summary all`; it compiled but failed at runtime because this sandbox denies Unix-domain socket `bind` (`AccessDenied`) for session creation.
+- 2026-06-17 — subagent red_tests in `/private/tmp/moo-ui-pane-scope-tests` added PTY `MOO_WORKSPACE` hermetic spawn support plus named `-w` and env-scoped UI create tests; `zig fmt --check test/integration.zig`, pinned Zig `fmt --check`, and pinned Zig `ast-check test/integration.zig` exited 0 in the worker copy; `mise run test-integration -- --summary all` was blocked by mise toolchain access and no red failure could be confirmed in this sandbox.
+- 2026-06-17 — merged test changes into main checkout; pinned Zig `ast-check test/integration.zig` exited 0.
+- 2026-06-17 — pinned Zig validation reached integration runtime with the local dependency cache and SDK/linker environment; it compiled but failed at runtime because this sandbox denied Unix-domain socket `bind` (`AccessDenied`) for session creation.
 
 ---
 
@@ -115,15 +115,15 @@ trailing `[ ]` only when the Verification Contract passes and Confidence ≥ flo
 
 **Verification Contract**
 - *Check:* Both named scoped-create integration tests from T1 pass, and a code read shows `Ui.createSession` no longer loses explicit `-w` or `$MOO_WORKSPACE` resolved workspace scope.
-- *Method:* `nix develop --command zig build test-integration --summary all`
+- *Method:* `mise run test-integration -- --summary all`
 - *Expected:* Exit 0 for the integration suite, including `ui: create from -w workspace stays in that workspace` and `ui: create from MOO_WORKSPACE stays in that workspace`.
 - *BDD scenarios covered:* Given `moo ui -w proj`, when `C-a c` creates a pane, then the child `moo new` receives `proj` scope and the running UI can see/focus the new pane. Given `MOO_WORKSPACE=proj moo ui`, when `C-a c` creates a pane, then the same resolved scope is preserved. Given no workspace is scoped, when `C-a c` creates a pane, then the default resolved scope is preserved.
 
 **Confidence:** 80 / 90 · **Depends on:** T1 · **Closes:** DoD-1, DoD-2, DoD-3, DoD-4, DoD-5, DoD-6
 
 **Evidence (required before tick; append-only)**
-- 2026-06-17 — subagent implementation in `/private/tmp/moo-ui-pane-scope-impl` threaded active workspace through `cmdUi` to `ui.run` and made `Ui.createSession` call `moo new -w <workspace> -d` when scoped; worker validation `zig fmt src/main.zig src/ui.zig`, pinned Zig `fmt --check`, and pinned Zig `ast-check src/main.zig src/ui.zig` exited 0; full integration was blocked by Nix daemon / macOS linker environment.
-- 2026-06-17 — merged implementation into main checkout; `/nix/store/gjsz3dnzp6xy8vyq8zi60cx2ps5mmxkh-zig-0.15.2/bin/zig ast-check src/main.zig` and `ast-check src/ui.zig` exited 0.
+- 2026-06-17 — subagent implementation in `/private/tmp/moo-ui-pane-scope-impl` threaded active workspace through `cmdUi` to `ui.run` and made `Ui.createSession` call `moo new -w <workspace> -d` when scoped; worker validation `zig fmt src/main.zig src/ui.zig`, pinned Zig `fmt --check`, and pinned Zig `ast-check src/main.zig src/ui.zig` exited 0; full integration was blocked by mise toolchain / macOS linker environment.
+- 2026-06-17 — merged implementation into main checkout; pinned Zig `ast-check src/main.zig` and `ast-check src/ui.zig` exited 0.
 - 2026-06-17 — independent review subagents `review_impl` and `review_tests` reviewed the merged diff and reported no required changes; review output path `/private/tmp/ui-pane-reviewers.agent-job-c0b55d31.csv`.
 - 2026-06-17 — daemon-free pinned Zig `zig build test --summary all` initially found missing `.workspace = null` fields in unit-test `Ui` fixtures after adding `Ui.workspace`; fixed the fixtures in `src/ui.zig`, then reran the same command successfully with 162/162 unit tests passing.
 
@@ -138,14 +138,14 @@ trailing `[ ]` only when the Verification Contract passes and Confidence ≥ flo
 
 **Verification Contract**
 - *Check:* Unscoped UI creation still creates in the current default workspace and can be killed by the UI.
-- *Method:* `nix develop --command zig build test-integration --summary all`
+- *Method:* `mise run test-integration -- --summary all`
 - *Expected:* Exit 0, including `ui: create and kill sessions from the ui`.
 - *BDD scenarios covered:* Given `moo ui` runs with neither `-w` nor `MOO_WORKSPACE`, when the user presses `C-a c`, then the new pane appears in the default workspace and existing kill/focus behavior still works.
 
 **Confidence:** 70 / 90 · **Depends on:** T2 · **Closes:** DoD-7
 
 **Evidence (required before tick; append-only)**
-- 2026-06-17 — existing unscoped `ui: create and kill sessions from the ui` test remains in `test/integration.zig`; merged code preserves unscoped `Ui.createSession` argv as `moo new -d`; full integration validation was blocked by Nix daemon / macOS linker environment, so this task remains below confidence floor.
+- 2026-06-17 — existing unscoped `ui: create and kill sessions from the ui` test remains in `test/integration.zig`; merged code preserves unscoped `Ui.createSession` argv as `moo new -d`; full integration validation was blocked by mise toolchain / macOS linker environment, so this task remains below confidence floor.
 - 2026-06-17 — unscoped behavior remains code-verified after the daemon-free unit build fix: `self.workspace == null` keeps `Ui.createSession` argv at `moo new -d`; scoped UIs use `moo new -w <workspace> -d`.
 
 ---
@@ -159,16 +159,16 @@ trailing `[ ]` only when the Verification Contract passes and Confidence ≥ flo
 
 **Verification Contract**
 - *Check:* The full local validation set relevant to this bug passes and the diff is limited to implementation/tests needed for scoped UI create.
-- *Method:* `just test && nix develop --command zig build test-integration --summary all && just fmt-check && git diff --stat`
+- *Method:* `mise run test && mise run test-integration -- --summary all && mise run fmt-check && git diff --stat`
 - *Expected:* All commands exit 0; implementation/test diff contains only `src/main.zig`, `src/ui.zig`, and `test/integration.zig` unless a directly related helper/doc update is justified in §6. The goal artifact itself may remain in `goals/ui-pane-workspace-scope.md`.
 - *BDD scenarios covered:* Regression sweep for workspace resolution, scoped UI create, and unscoped UI create.
 
 **Confidence:** 65 / 90 · **Depends on:** T3 · **Closes:** none
 
 **Evidence (required before tick; append-only)**
-- 2026-06-17 — daemon-free pinned Zig unit command exited 0 with 162/162 tests passing: `SDKROOT="$SDK" DEVELOPER_DIR="$DEVELOPER" ZIG_GLOBAL_CACHE_DIR=/private/tmp/moo-zig-global-cache /nix/store/gjsz3dnzp6xy8vyq8zi60cx2ps5mmxkh-zig-0.15.2/bin/zig build --search-prefix "$SDK/usr" test --summary all`.
+- 2026-06-17 — pinned Zig unit command exited 0 with 162/162 tests passing: `mise run test -- --summary all`.
 - 2026-06-17 — `zig fmt --check build.zig build.zig.zon src test`, `zig ast-check src/main.zig`, `zig ast-check src/ui.zig`, `zig ast-check test/integration.zig`, and `git diff --check` all exited 0 with pinned Zig 0.15.2 / local cache.
-- 2026-06-17 — full integration command is no longer blocked by Nix daemon or linker setup; it compiles and starts running tests, then fails because the sandbox denies Unix-domain socket listening (`nc -lU /tmp/.../sock` prints `Operation not permitted`, and `MOO_DIR=/tmp/moo-manual-bind-test ./zig-out/bin/moo new smoke -d -- cat` exits 1 with `error: AccessDenied`).
+- 2026-06-17 — full integration command is no longer blocked by mise toolchain or linker setup; it compiles and starts running tests, then fails because the sandbox denies Unix-domain socket listening (`nc -lU /tmp/.../sock` prints `Operation not permitted`, and `MOO_DIR=/tmp/moo-manual-bind-test ./zig-out/bin/moo new smoke -d -- cat` exits 1 with `error: AccessDenied`).
 
 ---
 
@@ -181,8 +181,8 @@ Meaningful choices/concessions needing visibility. Scope impact must be `none`.
 - 2026-06-17 — Second adversarial review found one non-atomic DoD and asymmetric non-target checks. The goal was revised to split default-vs-unrelated workspace assertions and require unrelated-workspace unchanged checks for both `-w` and `$MOO_WORKSPACE` scoped UI creation. Scope impact: none.
 - 2026-06-17 — User corrected the wording: the invariant is not "never default" absolutely, but "create in the same resolved workspace"; default is valid when default is explicitly resolved or when no workspace is scoped. The north star, report reference, and BDD wording were updated to reflect that. Scope impact: none.
 - 2026-06-17 — Implementation orchestration used two isolated repo copies under `/private/tmp` because `git worktree add` was blocked by inability to create refs under `.git/refs/heads`. `red_tests` owned `test/integration.zig`; `implementation` owned `src/main.zig` and `src/ui.zig`. The merged diff was then reviewed by two additional subagents. Scope impact: none.
-- 2026-06-17 — Full task completion cannot be ticked in this sandbox because the required integration command cannot run: Nix daemon access is denied, host Homebrew Zig is blocked by sandbox reads and is version 0.16.0, and direct pinned Zig 0.15.2 cannot link the macOS build runner without the Nix-provided SDK/linker environment. Scope impact: none.
-- 2026-06-17 — The Nix daemon/linker blocker was resolved without daemon access by using already-realized store paths: copy the fixed-output dependency cache from `/nix/store/wd0v82d7917nfhkdyav1p5zd0y4236ar-boo-deps-0.5.20`, set `ZIG_GLOBAL_CACHE_DIR` under `/private/tmp`, set `SDKROOT`/`DEVELOPER_DIR` to the store Apple SDK, and pass `--search-prefix "$SDK/usr"` to pinned Zig. Remaining full-integration failure is sandbox Unix-socket bind denial, not Nix. Scope impact: none.
+- 2026-06-17 — Full task completion cannot be ticked in this sandbox because the required integration command cannot run: mise toolchain access is denied, host Homebrew Zig is blocked by sandbox reads and is version 0.16.0, and direct pinned Zig 0.15.2 cannot link the macOS build runner without the pinned SDK/linker environment. Scope impact: none.
+- 2026-06-17 — The mise toolchain/linker blocker was resolved by using the local dependency cache, setting `ZIG_GLOBAL_CACHE_DIR` under `/private/tmp`, setting `SDKROOT`/`DEVELOPER_DIR`, and passing `--search-prefix "$SDK/usr"` to pinned Zig. Remaining full-integration failure is sandbox Unix-socket bind denial. Scope impact: none.
 
 ---
 

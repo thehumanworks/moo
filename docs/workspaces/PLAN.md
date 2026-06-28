@@ -38,27 +38,27 @@ with no `-w` default to **scoped to the active workspace** (recommended) or
 
 Zig has no separate linter: `zig fmt --check` is the format/lint gate and a clean
 `zig build` (the compiler's semantic analysis) is the rest. The toolchain is
-**pinned to Zig 0.15.2 via `nix develop`** — the host Zig is 0.16.0 and is
-rejected by ghostty, so bare `zig` will fail. Always go through `just` (which
-wraps `nix develop --command zig`) or `nix develop --command zig …` directly.
+**pinned to Zig 0.15.2 via `mise`** — the host Zig is 0.16.0 and is
+rejected by ghostty, so bare `zig` will fail. Always go through `mise run` tasks
+so the repo-pinned Zig/Bun tools are active.
 
 Every task is done only when ALL of these are captured green:
 
 | Gate | Command | Applies to |
 |------|---------|------------|
-| Format / lint | `just fmt-check` | every task |
-| Build (compiler analysis) | `just build` | every task |
-| Unit tests | `just test` | every task |
-| PTY integration tests | `just test-all` | tasks touching runtime/CLI/daemon/UI behaviour |
-| ReleaseSafe full | `just check-release` | final pre-merge pass only |
+| Format / lint | `mise run fmt-check` | every task |
+| Build (compiler analysis) | `mise run build` | every task |
+| Unit tests | `mise run test` | every task |
+| PTY integration tests | `mise run test-all` | tasks touching runtime/CLI/daemon/UI behaviour |
+| ReleaseSafe full | `mise run check-release` | final pre-merge pass only |
 
-`just check` = `fmt-check` + `build` + `test-all` in one shot; that is the
+`mise run check` = `fmt-check` + `build` + `test-all` in one shot; that is the
 standard per-task gate. CI enforces the same set (`.github/workflows/ci.yml`:
 `zig fmt --check`, `zig build`, `zig build test`, `zig build test-integration`,
 plus a ReleaseSafe `test-all`).
 
 Baseline status on the pulled tree (commit 7ac284f, macOS aarch64): GREEN.
-- Unit `156/156`; PTY integration `72/72`; `zig fmt --check` clean; `just check`
+- Unit `156/156`; PTY integration `72/72`; `zig fmt --check` clean; `mise run check`
   exit 0 (228/228), confirmed even with `MOO` set in the shell.
 - One integration test (`ui: create and kill sessions from the ui`) initially
   failed locally ONLY because the suite was run from inside a moo session, so
@@ -68,10 +68,10 @@ Baseline status on the pulled tree (commit 7ac284f, macOS aarch64): GREEN.
   `MOO`/`MOO_FOREGROUND`/`MOO_LOG`); no production code changed. CI was never
   affected (`$MOO` unset there); it was not a product bug or a regression.
 
-Gate rule: every task must leave `just check` fully green (all 228 tests pass).
+Gate rule: every task must leave `mise run check` fully green (all 228 tests pass).
 
 A completion claim for any task must cite the captured exit code / summary line
-of `just check` (or `just check-release` for the final pass), plus the new test
+of `mise run check` (or `mise run check-release` for the final pass), plus the new test
 that was observed **failing before** the implementation and **passing after**.
 No proxy (it compiles, the process is alive) counts as done.
 
@@ -95,7 +95,7 @@ collapse roles, but every W-task below is non-trivial enough to keep them split.
   ┌─ 2. IMPLEMENTER ──────────────────────────────────────────────┐
   │  Smallest change to make the authored tests pass. May NOT      │
   │  relax/skip/delete them; surfaces a conflict instead if one    │
-  │  cannot be satisfied honestly. Runs `just check`, captures it. │
+  │  cannot be satisfied honestly. Runs `mise run check`, captures it. │
   │  Output: impl diff + captured green gate.                      │
   └───────────────────────────────────────────────────────────────┘
                      │
@@ -110,7 +110,7 @@ collapse roles, but every W-task below is non-trivial enough to keep them split.
                      │ findings → back to implementer; else ↓
                      ▼
   ┌─ 4. QA (different agent) ──────────────────────────────────────┐
-  │  Runs `just check` (or check-release) clean AND walks the      │
+  │  Runs `mise run check` (or check-release) clean AND walks the      │
   │  task's manual scenario against the built binary. Confirms the │
   │  acceptance criteria map 1:1 to evidence. Output: verdict +    │
   │  captured artifacts.                                           │
@@ -131,14 +131,14 @@ has no memory of this session.
 ```
 TASK:        <Wn — one-sentence outcome>
 ROLE:        <test-author | implementer | reviewer | qa>
-REPO:        /Users/mish/projects/moo   (Zig 0.15.2 via `nix develop`; use `just`)
+REPO:        /Users/mish/projects/moo   (Zig 0.15.2 via `mise`; use `mise run`)
 SURFACE:     <exact files + functions, with file:line from the plan>
 CONTEXT:     <pointers/excerpts the role needs; nothing more>
 CONTRACT:    <for implementer/reviewer/qa: the authored tests are fixed — do not weaken>
 CONSTRAINTS: backward compatible (no workspace ⇒ identical to today);
              reuse paths.validateName for workspace names; match surrounding
              style; comments only where WHY is non-obvious; no unrelated edits.
-GATE:        `just check`  (or `just check-release` for the final pass)
+GATE:        `mise run check`  (or `mise run check-release` for the final pass)
 DELIVERABLE: <diff> + <captured command output with exit code> +
              <self-report mapping each acceptance criterion → file:line / evidence>
 RETURN:      raw result only — your final message is data for the orchestrator,
@@ -164,8 +164,8 @@ separate phase gated behind the open UI-default decision above.
 - **Goal:** a single reproducible "linted, formatted, tested" command, and a
   proven-green starting point so every later gate is meaningful.
 - **Done:** added `fmt-check`, `fmt`, `check`, `check-release` recipes to
-  `justfile`; baseline captured green (156/156 unit, fmt clean, integration green).
-- **Verification:** `just --list` shows the recipes; baseline output archived.
+  `mise.toml`; baseline captured green (156/156 unit, fmt clean, integration green).
+- **Verification:** `mise tasks ls` shows the recipes; baseline output archived.
 
 ### W1 — Workspace-aware socket directory resolution
 - **Goal:** `paths.socketDir` returns the base dir when no workspace is active and
@@ -184,7 +184,7 @@ separate phase gated behind the open UI-default decision above.
 - **Test contract (author writes first, in `src/paths.zig` tests):** unit tests
   for criteria 1–5 using `std.testing.tmpDir`, mirroring the existing
   `socketDirFrom` test style (paths.zig:244-311).
-- **Verification:** `just fmt-check && just test` green; new tests fail on the
+- **Verification:** `mise run fmt-check && mise run test` green; new tests fail on the
   unmodified tree first.
 
 ### W2 — `-w/--workspace` flag + `MOO_WORKSPACE` resolution in the CLI
@@ -203,7 +203,7 @@ separate phase gated behind the open UI-default decision above.
 - **Test contract:** unit test for `activeWorkspace()` precedence; integration
   tests in `test/integration.zig` for criteria 1, 2, 4 (drive the real binary,
   assert via `moo ls --json`).
-- **Verification:** `just check` green; new integration tests red on the
+- **Verification:** `mise run check` green; new integration tests red on the
   pre-W2 binary first.
 
 ### W3 — Daemon exports `MOO_WORKSPACE` into session env
@@ -221,7 +221,7 @@ separate phase gated behind the open UI-default decision above.
 - **Test contract:** integration test — create a workspace session running a
   shell, `moo send` a `printf "$MOO_WORKSPACE"`/`moo ls` probe, `moo peek` and
   assert the scoped result.
-- **Verification:** `just check` green; new test red before the env export.
+- **Verification:** `mise run check` green; new test red before the env export.
 
 ### W4 — `moo ws` command
 - **Goal:** discover and report workspaces.
@@ -234,7 +234,7 @@ separate phase gated behind the open UI-default decision above.
   3. empty/absent `ws/` ⇒ just the default workspace, no error.
 - **Test contract:** integration test — create sessions across two workspaces,
   assert `moo ws --json` shape and counts.
-- **Verification:** `just check` green; new test red first.
+- **Verification:** `mise run check` green; new test red first.
 
 ### W5 — Help & docs
 - **Goal:** `-w/--workspace`, `MOO_WORKSPACE`, and `moo ws` are documented.
@@ -243,7 +243,7 @@ separate phase gated behind the open UI-default decision above.
 - **Acceptance criteria:**
   1. `moo help ws` and `moo help new` mention the flag/command.
   2. README documents workspaces and the orchestrator-isolation property.
-- **Verification:** `just fmt-check` clean; `just run -- help ws` renders;
+- **Verification:** `mise run fmt-check` clean; `mise run run -- help ws` renders;
   manual read-through (no behavioural test).
 
 ### W6 — Phase 2: UI aggregate view (separate phase)
@@ -259,7 +259,7 @@ separate phase gated behind the open UI-default decision above.
   3. selection/browse/goto/scroll operate on the filtered list correctly.
 - **Test contract:** integration test driving the UI PTY, asserting section
   headers appear and the toggle changes the visible set.
-- **Verification:** `just check` green; new UI integration test red first.
+- **Verification:** `mise run check` green; new UI integration test red first.
 
 ---
 
@@ -267,5 +267,5 @@ separate phase gated behind the open UI-default decision above.
 
 Live status is in the harness task list (W1–W6 mirror the IDs here). The
 orchestrator marks a task `completed` only after its QA role returns a pass with
-captured `just check` output.
+captured `mise run check` output.
 ```

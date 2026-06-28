@@ -1,0 +1,175 @@
+[tools]
+zig = "0.15.2"
+bun = "1.3.14"
+
+[tasks.default]
+description = "List available project tasks"
+run = "mise tasks ls"
+
+[tasks.fetch]
+description = "Fetch Zig package dependencies with retry"
+shell = "bash -euo pipefail -c"
+run = '''
+for i in 1 2 3 4 5; do
+  mise run zig -- build --fetch=all && exit 0
+  echo "fetch attempt $i failed; retrying in 10s" >&2
+  sleep 10
+done
+exit 1
+'''
+
+[tasks.mcp-deps]
+description = "Install JavaScript workspace dependencies"
+run = "bun install --frozen-lockfile"
+
+[tasks.mcp-typecheck]
+description = "Type-check the TypeScript MCP server"
+depends = ["mcp-deps"]
+run = "bun run typecheck"
+
+[tasks.mcp-test]
+description = "Run MCP server unit tests"
+depends = ["mcp-deps"]
+run = "bun run test:mcp"
+
+[tasks.mcp-build]
+description = "Compile the MCP server executable"
+depends = ["mcp-deps"]
+run = "bun run build:mcp"
+
+[tasks.build]
+description = "Build the release binary"
+depends = ["mcp-deps"]
+run = "mise run zig -- build -Doptimize=ReleaseSafe"
+
+[tasks.build-debug]
+description = "Build an unoptimized debug binary"
+depends = ["mcp-deps"]
+run = "mise run zig -- build"
+
+[tasks.test]
+description = "Run unit tests"
+run = "mise run zig -- build test"
+
+[tasks.test-integration]
+description = "Run PTY integration tests"
+run = "mise run zig -- build test-integration"
+
+[tasks.test-all]
+description = "Run unit and PTY integration tests"
+run = "mise run zig -- build test-all"
+
+[tasks.fmt-check]
+description = "Check Zig formatting"
+run = "mise run zig -- fmt --check build.zig build.zig.zon packages/moo-cli/src packages/moo-cli/test packages/moo-cli/bench"
+
+[tasks.fmt]
+description = "Format Zig sources"
+run = "mise run zig -- fmt build.zig build.zig.zon packages/moo-cli/src packages/moo-cli/test packages/moo-cli/bench"
+
+[tasks.check]
+description = "Full local gate: format, MCP checks, build, unit and PTY integration tests"
+shell = "bash -euo pipefail -c"
+run = '''
+mise run fmt-check
+mise run mcp-typecheck
+mise run mcp-test
+mise run build
+mise run test-all
+'''
+
+[tasks.check-release]
+description = "ReleaseSafe gate"
+shell = "bash -euo pipefail -c"
+run = '''
+mise run fmt-check
+mise run mcp-typecheck
+mise run mcp-test
+mise run zig -- build test-all -Doptimize=ReleaseSafe
+'''
+
+[tasks.run]
+description = "Build and run moo, forwarding any extra args"
+run = "mise run zig -- build run --"
+
+[tasks.install]
+description = "Build, install, and ad-hoc re-sign moo and moo-mcp-server"
+depends = ["build"]
+shell = "bash -euo pipefail -c"
+run = '''
+install_dir="${MOO_INSTALL_DIR:-}"
+if [ -z "$install_dir" ]; then
+  if [ "$(uname)" = "Darwin" ] && [ -w /opt/homebrew/bin ]; then
+    install_dir=/opt/homebrew/bin
+  elif [ -w /usr/local/bin ]; then
+    install_dir=/usr/local/bin
+  else
+    install_dir="$HOME/.local/bin"
+  fi
+fi
+
+mkdir -p "$install_dir"
+rm -f "$install_dir/moo" "$install_dir/moo-mcp-server"
+cp zig-out/bin/moo "$install_dir/moo"
+chmod +x "$install_dir/moo"
+cp zig-out/bin/moo-mcp-server "$install_dir/moo-mcp-server"
+chmod +x "$install_dir/moo-mcp-server"
+
+if [ "$(uname)" = "Darwin" ]; then
+  codesign --force --sign - "$install_dir/moo"
+  codesign --force --sign - "$install_dir/moo-mcp-server"
+fi
+
+echo "installed: $("$install_dir/moo" version) -> $install_dir/moo"
+'''
+
+[tasks.sign]
+description = "Ad-hoc re-sign the installed binaries on macOS"
+shell = "bash -euo pipefail -c"
+run = '''
+install_dir="${MOO_INSTALL_DIR:-}"
+if [ -z "$install_dir" ]; then
+  if [ "$(uname)" = "Darwin" ] && [ -f /opt/homebrew/bin/moo ]; then
+    install_dir=/opt/homebrew/bin
+  elif [ -f /usr/local/bin/moo ]; then
+    install_dir=/usr/local/bin
+  else
+    install_dir="$HOME/.local/bin"
+  fi
+fi
+
+if [ "$(uname)" = "Darwin" ]; then
+  codesign --force --sign - "$install_dir/moo"
+  if [ -f "$install_dir/moo-mcp-server" ]; then
+    codesign --force --sign - "$install_dir/moo-mcp-server"
+  fi
+  echo "re-signed $install_dir/moo"
+else
+  echo "codesign is macOS-only; nothing to do on $(uname)"
+fi
+'''
+
+[tasks.uninstall]
+description = "Remove installed binaries"
+shell = "bash -euo pipefail -c"
+run = '''
+install_dir="${MOO_INSTALL_DIR:-}"
+if [ -z "$install_dir" ]; then
+  if [ "$(uname)" = "Darwin" ] && [ -f /opt/homebrew/bin/moo ]; then
+    install_dir=/opt/homebrew/bin
+  elif [ -f /usr/local/bin/moo ]; then
+    install_dir=/usr/local/bin
+  else
+    install_dir="$HOME/.local/bin"
+  fi
+fi
+
+rm -f "$install_dir/moo" "$install_dir/moo-mcp-server"
+'''
+
+[tasks.clean]
+description = "Remove build artifacts"
+run = "rm -rf zig-out .zig-cache"
+
+[bootstrap.packages]
+"brew:zig@0.15" = "latest"

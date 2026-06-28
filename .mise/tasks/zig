@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+zig_bin="${MOO_ZIG:-}"
+if [ -z "$zig_bin" ]; then
+  if [ "$(uname -s)" = "Darwin" ] && [ -x /opt/homebrew/opt/zig@0.15/bin/zig ]; then
+    zig_bin="/opt/homebrew/opt/zig@0.15/bin/zig"
+  else
+    zig_bin="$(command -v zig)"
+  fi
+fi
+
+exec "$zig_bin" "$@"
